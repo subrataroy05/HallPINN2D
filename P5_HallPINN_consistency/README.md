@@ -8,7 +8,7 @@ This record contains the input data, the trained physics-informed neural network
 
 ```
 data/                    input data (experimental profiles and magnetic field)
-reference_run/           reference reconstruction (Sec. 5)
+reference_run/           how to reproduce the reference reconstruction (Sec. 5) with the code at the repository root
 experiments/             constraint sequence and compatibility map (Sec. 7), one folder per training run
 experiments/paper_checks network-independent diagnostics on the trained fields (Sec. 8): compatibility map, ion trajectories
 experiments/bfield_2d_post  post-processing of the runs (energy budgets, momentum-implied currents, appendix figures)
@@ -32,7 +32,7 @@ The original measurements belong to Haas and Gallimore and must be cited as such
 
 ### reference_run/
 
-Reference configuration (Gaussian magnetic field, isotropic closure, algebraic current closure), 15,000 Adam epochs, initialization seed 7, collocation seed 2601. `run_sequence.sh` is the launcher, `code/` the PINN, `outputs/p5_reference_v3/p5_reference_v3_checkpoint.pt` the trained network, `v3_15k_full_metrics.json` and `outputs/p5_reference_v3/VALIDATION_p5_reference_v3.md` its metrics. Relative $L^2$ errors against the reconstructed profiles for this archived checkpoint: $V_p$ 0.0173, $T_e$ 0.070, $n_i$ 0.201; discharge current 5.400 A.
+The reference reconstruction of Sec. 5 (Gaussian magnetic field, isotropic closure, algebraic current closure, 15,000 Adam epochs, weight seed 7, collocation seed 2601) is produced by the code at the root of this repository (`code/`). Relative $L^2$ errors against the reconstructed profiles: $V_p$ 0.0173, $T_e$ 0.0730, $n_i$ 0.2048; discharge current 5.394 A. `reference_run/README.md` gives the command.
 
 ### experiments/
 

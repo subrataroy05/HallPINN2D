@@ -12,9 +12,18 @@ het_pinn_2d/
 │   ├── mainScript.py     driver: configuration, training loop, reporting
 │   ├── model.py          network and output parametrizations
 │   └── utils.py          residuals, losses, sampling, plotting, metrics
-├── haas_gallimore_p5_5p4A.csv    probe data (not included; see below)
+├── haas_gallimore_p5_5p4A.csv    reconstructed probe data (see below)
+├── P5_HallPINN_consistency/      data, trained networks and analyses of the consistency paper
 └── output/               created at run time
 ```
+
+## Consistency paper (PSST)
+
+`P5_HallPINN_consistency/` contains everything behind the manuscript *Beyond Data Fitting:
+Physical Consistency in Physics-Informed Hall Thruster Modeling* (Adjedj and Roy): the
+reconstructed and digitized probe profiles, the measured magnetic field and its fit, the code,
+logs and trained networks of every formulation of the constraint sequence, and the
+network-independent diagnostics. See `P5_HallPINN_consistency/README.md`.
 
 ## Requirements
 
