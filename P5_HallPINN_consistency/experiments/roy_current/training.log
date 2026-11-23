@@ -1,0 +1,119 @@
+Using device: cpu
+Init seed before build_model = 7; collocation/boundary seed = 2601.
+Training roy_current_seed7: from_scratch=True, checkpoint=<none>; epoch 0 -> 15000. ADAM epochs followed by 0 L-BFGS steps. v26 collocation counts are reused without resampling.
+Measured-flow inlet flag=True; nn_inlet=0.164145
+Continuity experiment overrides: ni_inlet=0.0138361 (4.640e+17 m^-3), Vn=450.0 m/s, nu_in=local nn*sigma_cex(E)*max(abs(Vix-Vn),v_thermal), nu_in_hat=nu_in*tau_ref, ki taper center=5.00 eV, width=0.35 eV, energy_alpha=2.50.
+Discharge-current target: Id=5.400 A, A_channel=1.138827e-02 m^2, JT_norm=0.02959875, JT_A_scale=182.44 A per normalized JT.
+Hybrid data loss ENABLED (weights ni=10.0, Te=5.0, Vp=30.0); csv=experiments/roy_current/code/haas_gallimore_p5_5p4A.csv
+Haas/Gallimore P5 (300V/5.4A) — data loaded (in-domain / dropped):
+   ni:  145 kept  /   210 outside domain
+   Te:  145 kept  /   210 outside domain
+   Vp:  145 kept  /   210 outside domain
+Data weights fixed for this run: ni/Te/Vp=10/5/30; no annealing.
+Output index mapping: 0=phi, 1=ni, 2=Vix, 3=Vir, 4=nn, 5=ne, 6=Vex, 7=Ver, 8=Te, 9=Vetheta, 10=eta
+Network raw outputs: 0=phi, 1=direct ni log-amplitude, 2=Vex correction, 3=Vir, 4=nn depletion, 5=Ver, 6=Vetheta, 7=eta, 8=Te, 9=Vix.
+Phi form: phi = phi_L + (phi_R - phi_L)*xi + xi*(1-xi)*25*tanh(raw0); end Dirichlet BCs are hard.
+Init phi hard-BC check: left=24.7933884298 target=24.7933884298 max_err=0.000e+00; right=9.60330578512 target=9.60330578512 max_err=0.000e+00
+Init phi centerline (A=25 correction active, raw0 at init):
+  x=0.00:phi=300.0V | x=0.10:phi=272.4V | x=0.20:phi=247.6V | x=0.30:phi=225.3V | x=0.40:phi=205.2V | x=0.50:phi=187.2V | x=0.60:phi=170.8V | x=0.70:phi=155.8V | x=0.80:phi=141.9V | x=0.90:phi=128.8V | x=1.00:phi=116.2V
+Phi shape capacity check: at x~0.55 linear=189.72V, max correction=72.60V (HG needs about +65.6V at x=0.55).
+Init Vix Bohm-referenced check: Vix(x=0)=0.025, Vix(x~0.55)=3.175, Vix(exit)=5.275, anode target=0.025, old Bohm=0.5.
+Init ni centerline shape (before training/checkpoint load):
+  x=0.00:ni=0.01384 | x=0.10:ni=0.02346 | x=0.20:ni=0.03538 | x=0.30:ni=0.04745 | x=0.40:ni=0.05658 | x=0.50:ni=0.06000 | x=0.60:ni=0.05658 | x=0.70:ni=0.04745 | x=0.80:ni=0.03538 | x=0.90:ni=0.02346 | x=1.00:ni=0.01384
+Init conservative ion-friction sign check at x=0.55 centerline: Vix=2.9125, Vn=0.15091, nu_in_hat=0.372684, neutral_friction_residual_x=6.085267e-02, birth_momentum_residual_x=-1.913831e-02, electron_drag_residual_x=7.752765e-03, total_drag_residual_x=4.946713e-02, ni*dphi/dx=-8.000283e-01, |friction/electric|=0.0618317. Positive neutral-friction residual at Vix>Vn corresponds to a negative physical drag force.
+Model initialized. eta_max=1.00e-04, ki_scale=1.0
+Ion continuity residual scale factor: 3.240734e-01
+Electron energy residual scale factor: 3.546061e+02
+Ion momentum residual scale factor: 7.870302e-01
+Fixed reference residual scales: ion_cont=0.6100892858913114, energy=0.965239365788521, ion_mom=0.7936910647527818.
+Ion force sign check: old 1D closure gives Vix*dVix/dx + dphi/dx = 0; therefore conservative residual uses +ni*dphi/dx.
+Typical collision magnitudes at init: nu_ei=2.792e+06 Hz, nu_en=2.368e+06 Hz
+compute_data_loss output index mapping: {'ni': 1, 'Te': 8, 'Vp': 0}
+  PINN.forward returns (0=phi, 1=ni, 2=Vix, 3=Vir, 4=nn, 5=ne, 6=Vex, 7=Ver, 8=Te, 9=Vetheta, 10=eta)
+[epoch     0] total=46899417.584091  ni_peak=0.0600@x=0.503  sat95=0.000  IonCont=0.3266 NeutCont=0.0864 Poisson=0.0023 wdata=1
+  epoch   250 | total=22537.9622 | Poisson=3.053e-06 | IonCont=0.2280 | NeutCont=0.0074 | |eta|=2.82e-06 | Id_mean_A=77.0650 | ni int_max=0.0565 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=8.240e-01/2.105e+00/9.830e+00
+[epoch   500] total=54708.628857  ni_peak=0.0523@x=0.477  sat95=0.000  IonCont=0.2603 NeutCont=0.0789 Poisson=0.0022  wdata=1  Ldata(ni/Te/Vp)=7.706e-01/1.900e+00/3.619e+00
+  epoch   750 | total=2811.5388 | Poisson=6.079e-06 | IonCont=0.1164 | NeutCont=0.0044 | |eta|=1.08e-05 | Id_mean_A=-18.2544 | ni int_max=0.0485 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=7.231e-01/1.713e+00/1.326e+00
+[epoch  1000] total=9917.778264  ni_peak=0.0418@x=0.432  sat95=0.000  IonCont=0.1743 NeutCont=0.0520 Poisson=0.0025  wdata=1  Ldata(ni/Te/Vp)=7.256e-01/1.720e+00/1.189e+00
+[current weights epoch  1000] {"Vix_exit_km_s": 13.145417743770675, "Id_A": [-0.28807389221067825, -3.8924382933500197, 0.6643472552442429], "ion_exit_A": 5.125197929654898, "grid_Vex_positive_fraction": 0.78325, "ni_pooled_L2": 0.5471294740731092, "ion_imbalance_over_source": -0.47405353708429143, "neutral_defect_over_inflow": -1.6529318146902905, "ion_training_residual_exit": -0.9946475203333394, "neutral_training_residual_exit": 1.6529318146902905, "max_abs_Vex_normalized": 9.20966139764575}
+  epoch  1250 | total=8503.7493 | Poisson=9.437e-06 | IonCont=0.0496 | NeutCont=0.0015 | |eta|=2.47e-05 | Id_mean_A=49.9857 | ni int_max=0.0381 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=8.317e-01/1.737e+00/1.138e+00
+[epoch  1500] total=465.705547  ni_peak=0.0311@x=0.367  sat95=0.000  IonCont=0.1101 NeutCont=0.0284 Poisson=0.0038  wdata=1  Ldata(ni/Te/Vp)=1.078e+00/1.745e+00/1.132e+00
+  epoch  1750 | total=1432.5396 | Poisson=1.765e-05 | IonCont=0.0207 | NeutCont=0.0005 | |eta|=3.49e-05 | Id_mean_A=-12.4532 | ni int_max=0.0308 | lr=5.00e-05 | wdata=1 | Ldata(ni/Te/Vp)=1.284e+00/1.720e+00/1.028e+00
+[epoch  2000] total=145.051404  ni_peak=0.0275@x=0.342  sat95=0.000  IonCont=0.0818 NeutCont=0.0199 Poisson=0.0044  wdata=1  Ldata(ni/Te/Vp)=1.403e+00/1.707e+00/1.009e+00
+[current weights epoch  2000] {"Vix_exit_km_s": 10.412419471437415, "Id_A": [-6.273198908708936, -13.382693187819797, 0.5892394037342928], "ion_exit_A": 1.3604322043895085, "grid_Vex_positive_fraction": 0.937, "ni_pooled_L2": 0.6790723993794633, "ion_imbalance_over_source": -0.7239771027220948, "neutral_defect_over_inflow": -0.40277114403467223, "ion_training_residual_exit": -0.7378969471646182, "neutral_training_residual_exit": 0.40277114403467223, "max_abs_Vex_normalized": 10.39379122695655}
+  epoch  2250 | total=155.3329 | Poisson=2.101e-05 | IonCont=0.0151 | NeutCont=0.0003 | |eta|=3.84e-05 | Id_mean_A=8.3225 | ni int_max=0.0285 | lr=5.00e-05 | wdata=1 | Ldata(ni/Te/Vp)=1.554e+00/1.688e+00/9.807e-01
+[epoch  2500] total=96.295787  ni_peak=0.0246@x=0.312  sat95=0.000  IonCont=0.0634 NeutCont=0.0154 Poisson=0.0049  wdata=1  Ldata(ni/Te/Vp)=1.841e+00/1.617e+00/9.012e-01
+  epoch  2750 | total=177.2647 | Poisson=2.633e-05 | IonCont=0.0090 | NeutCont=0.0002 | |eta|=4.03e-05 | Id_mean_A=0.6237 | ni int_max=0.0256 | lr=5.00e-05 | wdata=1 | Ldata(ni/Te/Vp)=2.039e+00/1.566e+00/8.570e-01
+[epoch  3000] total=385.379281  ni_peak=0.0221@x=0.281  sat95=0.000  IonCont=0.0512 NeutCont=0.0130 Poisson=0.0054  wdata=1  Ldata(ni/Te/Vp)=2.382e+00/1.516e+00/8.209e-01
+[current weights epoch  3000] {"Vix_exit_km_s": 8.831884373127512, "Id_A": [21.981792908042454, 24.996861805427425, 3.204899827121407], "ion_exit_A": 0.5868837351032952, "grid_Vex_positive_fraction": 0.0003125, "ni_pooled_L2": 0.764356997881762, "ion_imbalance_over_source": -0.8494777446496694, "neutral_defect_over_inflow": -0.02414417755062207, "ion_training_residual_exit": -0.6390232408745036, "neutral_training_residual_exit": 0.02414417755062207, "max_abs_Vex_normalized": 17.819824880610252}
+  epoch  3250 | total=83.9694 | Poisson=3.076e-05 | IonCont=0.0062 | NeutCont=0.0002 | |eta|=4.34e-05 | Id_mean_A=4.3952 | ni int_max=0.0233 | lr=2.50e-05 | wdata=1 | Ldata(ni/Te/Vp)=2.611e+00/1.481e+00/8.068e-01
+[epoch  3500] total=129.676046  ni_peak=0.0212@x=0.266  sat95=0.000  IonCont=0.0470 NeutCont=0.0124 Poisson=0.0057  wdata=1  Ldata(ni/Te/Vp)=2.668e+00/1.461e+00/7.898e-01
+  epoch  3750 | total=176.2264 | Poisson=3.312e-05 | IonCont=0.0057 | NeutCont=0.0002 | |eta|=4.37e-05 | Id_mean_A=0.5318 | ni int_max=0.0229 | lr=2.50e-05 | wdata=1 | Ldata(ni/Te/Vp)=2.728e+00/1.438e+00/7.720e-01
+[epoch  4000] total=84.497472  ni_peak=0.0208@x=0.261  sat95=0.000  IonCont=0.0449 NeutCont=0.0122 Poisson=0.0059  wdata=1  Ldata(ni/Te/Vp)=2.768e+00/1.410e+00/7.475e-01
+[current weights epoch  4000] {"Vix_exit_km_s": 8.537047082010076, "Id_A": [16.93524758802316, 16.83509930322232, 2.5725039465940185], "ion_exit_A": 0.4659736652866864, "grid_Vex_positive_fraction": 0.0254375, "ni_pooled_L2": 0.7868356737757192, "ion_imbalance_over_source": -0.8770774859884006, "neutral_defect_over_inflow": 0.05230941875911178, "ion_training_residual_exit": -0.6211059541113705, "neutral_training_residual_exit": -0.05230941875911178, "max_abs_Vex_normalized": 18.767238120779012}
+  epoch  4250 | total=117.5272 | Poisson=3.721e-05 | IonCont=0.0052 | NeutCont=0.0002 | |eta|=4.33e-05 | Id_mean_A=8.0638 | ni int_max=0.0226 | lr=2.50e-05 | wdata=1 | Ldata(ni/Te/Vp)=2.790e+00/1.380e+00/7.173e-01
+[epoch  4500] total=170.751587  ni_peak=0.0206@x=0.261  sat95=0.000  IonCont=0.0430 NeutCont=0.0122 Poisson=0.0063  wdata=1  Ldata(ni/Te/Vp)=2.795e+00/1.348e+00/6.846e-01
+  epoch  4750 | total=79.7801 | Poisson=4.279e-05 | IonCont=0.0048 | NeutCont=0.0002 | |eta|=4.22e-05 | Id_mean_A=4.0745 | ni int_max=0.0225 | lr=2.50e-05 | wdata=1 | Ldata(ni/Te/Vp)=2.785e+00/1.315e+00/6.510e-01
+[epoch  5000] total=111.201542  ni_peak=0.0205@x=0.256  sat95=0.000  IonCont=0.0413 NeutCont=0.0122 Poisson=0.0068  wdata=1  Ldata(ni/Te/Vp)=2.769e+00/1.281e+00/6.177e-01
+[current weights epoch  5000] {"Vix_exit_km_s": 8.25696487124534, "Id_A": [12.585844290628952, 12.252030490810602, 2.5119156897233186], "ion_exit_A": 0.46255801274354147, "grid_Vex_positive_fraction": 0.0805625, "ni_pooled_L2": 0.7886520959015592, "ion_imbalance_over_source": -0.878877822340953, "neutral_defect_over_inflow": 0.0973794675696219, "ion_training_residual_exit": -0.6266029717423484, "neutral_training_residual_exit": -0.0973794675696219, "max_abs_Vex_normalized": 18.8998203570589}
+  epoch  5250 | total=153.6007 | Poisson=4.862e-05 | IonCont=0.0044 | NeutCont=0.0002 | |eta|=4.13e-05 | Id_mean_A=0.9855 | ni int_max=0.0223 | lr=2.50e-05 | wdata=1 | Ldata(ni/Te/Vp)=2.792e+00/1.253e+00/5.941e-01
+[epoch  5500] total=75.027633  ni_peak=0.0202@x=0.256  sat95=0.000  IonCont=0.0395 NeutCont=0.0122 Poisson=0.0072  wdata=1  Ldata(ni/Te/Vp)=2.833e+00/1.227e+00/5.747e-01
+  epoch  5750 | total=111.7458 | Poisson=5.405e-05 | IonCont=0.0040 | NeutCont=0.0002 | |eta|=4.12e-05 | Id_mean_A=8.1836 | ni int_max=0.0219 | lr=2.50e-05 | wdata=1 | Ldata(ni/Te/Vp)=2.865e+00/1.199e+00/5.536e-01
+[epoch  6000] total=149.423459  ni_peak=0.0199@x=0.251  sat95=0.000  IonCont=0.0378 NeutCont=0.0122 Poisson=0.0076  wdata=1  Ldata(ni/Te/Vp)=2.891e+00/1.171e+00/5.321e-01
+[current weights epoch  6000] {"Vix_exit_km_s": 8.086086949901972, "Id_A": [5.64260463594564, 4.007609522680751, 1.9647374369025319], "ion_exit_A": 0.438255717229967, "grid_Vex_positive_fraction": 0.2714375, "ni_pooled_L2": 0.7964388306048801, "ion_imbalance_over_source": -0.8846275603603139, "neutral_defect_over_inflow": 0.1375016800304945, "ion_training_residual_exit": -0.6219601588777299, "neutral_training_residual_exit": -0.1375016800304945, "max_abs_Vex_normalized": 16.764187879450873}
+  epoch  6250 | total=71.3922 | Poisson=6.138e-05 | IonCont=0.0038 | NeutCont=0.0002 | |eta|=4.03e-05 | Id_mean_A=5.6764 | ni int_max=0.0218 | lr=2.50e-05 | wdata=1 | Ldata(ni/Te/Vp)=2.847e+00/1.139e+00/5.039e-01
+[epoch  6500] total=67.946829  ni_peak=0.0204@x=0.261  sat95=0.000  IonCont=0.0380 NeutCont=0.0125 Poisson=0.0082  wdata=1  Ldata(ni/Te/Vp)=2.609e+00/1.116e+00/4.673e-01
+  epoch  6750 | total=63.6091 | Poisson=7.109e-05 | IonCont=0.0039 | NeutCont=0.0002 | |eta|=3.59e-05 | Id_mean_A=6.1330 | ni int_max=0.0230 | lr=2.50e-05 | wdata=1 | Ldata(ni/Te/Vp)=2.412e+00/1.083e+00/4.337e-01
+[epoch  7000] total=58.680582  ni_peak=0.0213@x=0.276  sat95=0.000  IonCont=0.0384 NeutCont=0.0131 Poisson=0.0088  wdata=1  Ldata(ni/Te/Vp)=2.232e+00/1.042e+00/4.013e-01
+[current weights epoch  7000] {"Vix_exit_km_s": 8.041649369861545, "Id_A": [4.702605790263896, 3.9516968581316534, 2.5723497447663695], "ion_exit_A": 0.6536388768994912, "grid_Vex_positive_fraction": 0.2948125, "ni_pooled_L2": 0.7619846704199533, "ion_imbalance_over_source": -0.8356395158132716, "neutral_defect_over_inflow": 0.10897445944969467, "ion_training_residual_exit": -0.6500020663665541, "neutral_training_residual_exit": -0.10897445944969467, "max_abs_Vex_normalized": 15.107362078730452}
+  epoch  7250 | total=52.9371 | Poisson=8.348e-05 | IonCont=0.0039 | NeutCont=0.0002 | |eta|=3.08e-05 | Id_mean_A=5.6095 | ni int_max=0.0242 | lr=2.50e-05 | wdata=1 | Ldata(ni/Te/Vp)=2.023e+00/9.839e-01/3.650e-01
+[epoch  7500] total=60.477177  ni_peak=0.0226@x=0.302  sat95=0.000  IonCont=0.0378 NeutCont=0.0141 Poisson=0.0098  wdata=1  Ldata(ni/Te/Vp)=1.778e+00/9.300e-01/3.203e-01
+  epoch  7750 | total=59.9052 | Poisson=9.705e-05 | IonCont=0.0037 | NeutCont=0.0002 | |eta|=2.73e-05 | Id_mean_A=6.9964 | ni int_max=0.0250 | lr=1.25e-05 | wdata=1 | Ldata(ni/Te/Vp)=1.791e+00/9.094e-01/3.161e-01
+[epoch  8000] total=53.718253  ni_peak=0.0225@x=0.302  sat95=0.000  IonCont=0.0371 NeutCont=0.0141 Poisson=0.0099  wdata=1  Ldata(ni/Te/Vp)=1.771e+00/9.003e-01/3.125e-01
+[current weights epoch  8000] {"Vix_exit_km_s": 7.994865555842814, "Id_A": [4.20747302641872, 3.7825358640457236, 3.093210523209027], "ion_exit_A": 0.9265901669535709, "grid_Vex_positive_fraction": 0.393, "ni_pooled_L2": 0.7297067139814567, "ion_imbalance_over_source": -0.7708149273472023, "neutral_defect_over_inflow": 0.10782389368200708, "ion_training_residual_exit": -0.6284347994595297, "neutral_training_residual_exit": -0.10782389368200708, "max_abs_Vex_normalized": 13.739186969731977}
+  epoch  8250 | total=50.5026 | Poisson=9.926e-05 | IonCont=0.0037 | NeutCont=0.0002 | |eta|=2.68e-05 | Id_mean_A=6.3364 | ni int_max=0.0251 | lr=6.25e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.756e+00/8.943e-01/3.098e-01
+[epoch  8500] total=46.812012  ni_peak=0.0226@x=0.307  sat95=0.000  IonCont=0.0370 NeutCont=0.0142 Poisson=0.0101  wdata=1  Ldata(ni/Te/Vp)=1.724e+00/8.888e-01/3.055e-01
+  epoch  8750 | total=45.0579 | Poisson=1.020e-04 | IonCont=0.0037 | NeutCont=0.0002 | |eta|=2.61e-05 | Id_mean_A=5.5067 | ni int_max=0.0253 | lr=3.13e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.698e+00/8.871e-01/3.021e-01
+[epoch  9000] total=44.410561  ni_peak=0.0228@x=0.307  sat95=0.000  IonCont=0.0371 NeutCont=0.0143 Poisson=0.0102  wdata=1  Ldata(ni/Te/Vp)=1.659e+00/8.821e-01/2.967e-01
+[current weights epoch  9000] {"Vix_exit_km_s": 8.066923505040533, "Id_A": [4.986599963851017, 4.938988824884867, 3.3880482345372247], "ion_exit_A": 1.0314134052775497, "grid_Vex_positive_fraction": 0.309125, "ni_pooled_L2": 0.7200381630645094, "ion_imbalance_over_source": -0.7456434108178558, "neutral_defect_over_inflow": 0.10429910079453221, "ion_training_residual_exit": -0.6139640726360064, "neutral_training_residual_exit": -0.10429910079453221, "max_abs_Vex_normalized": 13.639633512416024}
+  epoch  9250 | total=43.9635 | Poisson=1.049e-04 | IonCont=0.0037 | NeutCont=0.0002 | |eta|=2.55e-05 | Id_mean_A=5.4893 | ni int_max=0.0255 | lr=3.13e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.644e+00/8.794e-01/2.946e-01
+[epoch  9500] total=43.738053  ni_peak=0.0230@x=0.312  sat95=0.000  IonCont=0.0371 NeutCont=0.0144 Poisson=0.0103  wdata=1  Ldata(ni/Te/Vp)=1.615e+00/8.741e-01/2.905e-01
+  epoch  9750 | total=47.6951 | Poisson=1.083e-04 | IonCont=0.0037 | NeutCont=0.0002 | |eta|=2.49e-05 | Id_mean_A=4.2239 | ni int_max=0.0257 | lr=3.13e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.589e+00/8.688e-01/2.868e-01
+[epoch 10000] total=42.767800  ni_peak=0.0231@x=0.312  sat95=0.000  IonCont=0.0370 NeutCont=0.0144 Poisson=0.0105  wdata=1  Ldata(ni/Te/Vp)=1.578e+00/8.654e-01/2.851e-01
+[current weights epoch 10000] {"Vix_exit_km_s": 8.149663343582723, "Id_A": [5.2689643092551135, 5.509632505806607, 3.6137255419680048], "ion_exit_A": 1.1265396224673239, "grid_Vex_positive_fraction": 0.290875, "ni_pooled_L2": 0.7127189491359773, "ion_imbalance_over_source": -0.7238895752482812, "neutral_defect_over_inflow": 0.0976475944324454, "ion_training_residual_exit": -0.6028154623918682, "neutral_training_residual_exit": -0.0976475944324454, "max_abs_Vex_normalized": 13.508029826536998}
+  epoch 10250 | total=43.2998 | Poisson=1.097e-04 | IonCont=0.0036 | NeutCont=0.0002 | |eta|=2.47e-05 | Id_mean_A=4.8159 | ni int_max=0.0258 | lr=3.13e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.570e+00/8.629e-01/2.840e-01
+[epoch 10500] total=42.201565  ni_peak=0.0231@x=0.317  sat95=0.000  IonCont=0.0369 NeutCont=0.0145 Poisson=0.0105  wdata=1  Ldata(ni/Te/Vp)=1.555e+00/8.576e-01/2.816e-01
+  epoch 10750 | total=42.8738 | Poisson=1.114e-04 | IonCont=0.0036 | NeutCont=0.0002 | |eta|=2.45e-05 | Id_mean_A=4.7797 | ni int_max=0.0259 | lr=3.13e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.546e+00/8.545e-01/2.804e-01
+[epoch 11000] total=41.743545  ni_peak=0.0232@x=0.317  sat95=0.000  IonCont=0.0368 NeutCont=0.0145 Poisson=0.0106  wdata=1  Ldata(ni/Te/Vp)=1.529e+00/8.479e-01/2.778e-01
+[current weights epoch 11000] {"Vix_exit_km_s": 8.20481352392744, "Id_A": [5.361328750108279, 5.789132874142358, 3.772427179950539], "ion_exit_A": 1.194698060191685, "grid_Vex_positive_fraction": 0.28475, "ni_pooled_L2": 0.7081984237108453, "ion_imbalance_over_source": -0.7093804391185577, "neutral_defect_over_inflow": 0.09035596652710289, "ion_training_residual_exit": -0.597107546830333, "neutral_training_residual_exit": -0.09035596652710289, "max_abs_Vex_normalized": 13.419755139064549}
+  epoch 11250 | total=41.0376 | Poisson=1.133e-04 | IonCont=0.0036 | NeutCont=0.0002 | |eta|=2.42e-05 | Id_mean_A=5.2249 | ni int_max=0.0259 | lr=1.56e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.522e+00/8.451e-01/2.767e-01
+[epoch 11500] total=43.447837  ni_peak=0.0232@x=0.317  sat95=0.000  IonCont=0.0367 NeutCont=0.0145 Poisson=0.0107  wdata=1  Ldata(ni/Te/Vp)=1.519e+00/8.437e-01/2.763e-01
+  epoch 11750 | total=40.7246 | Poisson=1.141e-04 | IonCont=0.0036 | NeutCont=0.0002 | |eta|=2.41e-05 | Id_mean_A=5.3988 | ni int_max=0.0260 | lr=1.56e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.511e+00/8.407e-01/2.751e-01
+[epoch 12000] total=40.732781  ni_peak=0.0232@x=0.317  sat95=0.000  IonCont=0.0366 NeutCont=0.0146 Poisson=0.0107  wdata=1  Ldata(ni/Te/Vp)=1.500e+00/8.366e-01/2.736e-01
+[current weights epoch 12000] {"Vix_exit_km_s": 8.234496986724459, "Id_A": [4.879630421629945, 5.152453709104461, 3.7687403283130947], "ion_exit_A": 1.2378890958177038, "grid_Vex_positive_fraction": 0.3603125, "ni_pooled_L2": 0.705418429985828, "ion_imbalance_over_source": -0.7003778993011924, "neutral_defect_over_inflow": 0.08555698989702988, "ion_training_residual_exit": -0.5935759269983569, "neutral_training_residual_exit": -0.08555698989702988, "max_abs_Vex_normalized": 13.134717138035354}
+  epoch 12250 | total=40.3302 | Poisson=1.158e-04 | IonCont=0.0035 | NeutCont=0.0002 | |eta|=2.39e-05 | Id_mean_A=5.1213 | ni int_max=0.0260 | lr=1.56e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.489e+00/8.323e-01/2.721e-01
+[epoch 12500] total=40.403604  ni_peak=0.0233@x=0.322  sat95=0.000  IonCont=0.0365 NeutCont=0.0146 Poisson=0.0108  wdata=1  Ldata(ni/Te/Vp)=1.486e+00/8.312e-01/2.717e-01
+  epoch 12750 | total=40.0300 | Poisson=1.168e-04 | IonCont=0.0035 | NeutCont=0.0002 | |eta|=2.38e-05 | Id_mean_A=5.1111 | ni int_max=0.0261 | lr=1.56e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.476e+00/8.271e-01/2.703e-01
+[epoch 13000] total=39.706537  ni_peak=0.0233@x=0.322  sat95=0.000  IonCont=0.0364 NeutCont=0.0146 Poisson=0.0108  wdata=1  Ldata(ni/Te/Vp)=1.470e+00/8.242e-01/2.695e-01
+[current weights epoch 13000] {"Vix_exit_km_s": 8.279661073206903, "Id_A": [4.688327333626402, 4.946628015072476, 3.8123037442287395], "ion_exit_A": 1.2872242771062377, "grid_Vex_positive_fraction": 0.390625, "ni_pooled_L2": 0.7025886544666493, "ion_imbalance_over_source": -0.6897784686501547, "neutral_defect_over_inflow": 0.08139944747232648, "ion_training_residual_exit": -0.5882227531168992, "neutral_training_residual_exit": -0.08139944747232648, "max_abs_Vex_normalized": 12.90999180322116}
+  epoch 13250 | total=39.7838 | Poisson=1.177e-04 | IonCont=0.0035 | NeutCont=0.0002 | |eta|=2.37e-05 | Id_mean_A=5.0793 | ni int_max=0.0261 | lr=1.56e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.465e+00/8.217e-01/2.688e-01
+[epoch 13500] total=39.620399  ni_peak=0.0233@x=0.322  sat95=0.000  IonCont=0.0363 NeutCont=0.0146 Poisson=0.0109  wdata=1  Ldata(ni/Te/Vp)=1.463e+00/8.204e-01/2.684e-01
+  epoch 13750 | total=39.1827 | Poisson=1.189e-04 | IonCont=0.0035 | NeutCont=0.0002 | |eta|=2.35e-05 | Id_mean_A=5.4782 | ni int_max=0.0262 | lr=1.56e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.451e+00/8.148e-01/2.668e-01
+[epoch 14000] total=40.934018  ni_peak=0.0233@x=0.322  sat95=0.000  IonCont=0.0361 NeutCont=0.0147 Poisson=0.0109  wdata=1  Ldata(ni/Te/Vp)=1.443e+00/8.113e-01/2.658e-01
+[current weights epoch 14000] {"Vix_exit_km_s": 8.317021660471882, "Id_A": [5.368190332827635, 5.934389929824134, 3.9940167225046577], "ion_exit_A": 1.3348511046258125, "grid_Vex_positive_fraction": 0.2944375, "ni_pooled_L2": 0.6999213174362715, "ion_imbalance_over_source": -0.6799938920228321, "neutral_defect_over_inflow": 0.07637743144772656, "ion_training_residual_exit": -0.5839350701504343, "neutral_training_residual_exit": -0.07637743144772656, "max_abs_Vex_normalized": 12.93791643141948}
+  epoch 14250 | total=39.5732 | Poisson=1.197e-04 | IonCont=0.0034 | NeutCont=0.0002 | |eta|=2.34e-05 | Id_mean_A=5.7708 | ni int_max=0.0262 | lr=1.00e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.440e+00/8.097e-01/2.654e-01
+[epoch 14500] total=38.740326  ni_peak=0.0233@x=0.322  sat95=0.000  IonCont=0.0360 NeutCont=0.0147 Poisson=0.0110  wdata=1  Ldata(ni/Te/Vp)=1.437e+00/8.081e-01/2.649e-01
+  epoch 14750 | total=38.7547 | Poisson=1.204e-04 | IonCont=0.0034 | NeutCont=0.0002 | |eta|=2.33e-05 | Id_mean_A=5.1290 | ni int_max=0.0262 | lr=1.00e-06 | wdata=1 | Ldata(ni/Te/Vp)=1.431e+00/8.056e-01/2.642e-01
+[epoch 15000] total=39.149484  ni_peak=0.0234@x=0.322  sat95=0.000  IonCont=0.0359 NeutCont=0.0147 Poisson=0.0110  wdata=1  Ldata(ni/Te/Vp)=1.421e+00/8.004e-01/2.628e-01
+[current weights epoch 15000] {"Vix_exit_km_s": 8.351525583133595, "Id_A": [4.28025400983091, 4.5955024557756206, 3.903359964542627], "ion_exit_A": 1.3778258227185314, "grid_Vex_positive_fraction": 0.42625, "ni_pooled_L2": 0.697631297344432, "ion_imbalance_over_source": -0.6710797869334831, "neutral_defect_over_inflow": 0.07233515261448913, "ion_training_residual_exit": -0.5795175755190615, "neutral_training_residual_exit": -0.07233515261448913, "max_abs_Vex_normalized": 12.500027481402533}
+Training stopped: completed 15000 ADAM epochs + 0 L-BFGS steps
+Elapsed: 412.32 min
+Checkpoint saved: experiments/roy_current/output/checkpoint.pt
+Haas/Gallimore P5 (300V/5.4A) — data loaded (in-domain / dropped):
+   ni:  145 kept  /   210 outside domain
+   Te:  145 kept  /   210 outside domain
+   Vp:  145 kept  /   210 outside domain
+Final Part A audit 200x64: ion=-0.671079787, neutral=0.0723351526
+Final Part A audit 400x128: ion=-0.671079787, neutral=0.0723351526
+Final Part A audit 800x256: ion=-0.671079787, neutral=0.0723351526
+Saved: experiments/roy_current/figures/Big_Plots/roy_current_seed7_centerline.png

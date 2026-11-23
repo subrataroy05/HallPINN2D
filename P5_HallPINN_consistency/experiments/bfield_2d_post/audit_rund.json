@@ -1,0 +1,26 @@
+{
+ "C1": {
+  "energy_res_rms_as_trained": 0.4985353738133385,
+  "energy_res_rms_sign_corrected_same_fields": 0.6938673915493793,
+  "ionization_term_rms": 0.4432257197942208,
+  "ohmic_rms": 0.35706221659674037,
+  "enthalpy_flux_rms": 0.30405603508512663
+ },
+ "C2": {
+  "drag_nu_ei_plus_en_rms": 1.3997698351062649e-05,
+  "drag_nu_ei_only_rms": 1.1875574154975002e-06,
+  "difference_rms": 1.3494448059216016e-05,
+  "ion_mom_x_res_rms": 0.13560707678158215,
+  "electric_rms": 0.7003739971904938
+ },
+ "C3": {
+  "centrifugal_rms": 0.0013912091776099374,
+  "centrifugal_max": 0.005149901010713233,
+  "radial_electric_rms": 0.000862335533108998,
+  "elec_mom_r_res_rms": 0.00086234360783664,
+  "coriolis_rms": 1.1684292008872914e-08,
+  "elec_mom_theta_res_rms": 0.003902440241562933,
+  "hall_theta_rms": 0.0016213237591254255,
+  "Vet_max": 689.4406411284556
+ }
+}

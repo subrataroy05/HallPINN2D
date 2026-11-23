@@ -1,0 +1,1803 @@
+from integrated_constraints import integrated_balances, mean_current_A
+import os
+import json
+import math
+import numpy as np
+import torch
+import torch.nn.functional as F
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+
+# =========================================================
+# I/O helpers
+# =========================================================
+
+def create_output_folders(output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "Big_Plots"), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "Individual_Plots"), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "Loss_Plots"), exist_ok=True)
+
+
+def sample_domain_points(n_points, domain, device):
+    x = (
+        torch.rand(n_points, device=device, dtype=torch.float64)
+        * (domain["x_max"] - domain["x_min"])
+        + domain["x_min"]
+    )
+    r = (
+        torch.rand(n_points, device=device, dtype=torch.float64)
+        * (domain["r_max"] - domain["r_min"])
+        + domain["r_min"]
+    )
+    x.requires_grad_(True)
+    r.requires_grad_(True)
+    return x, r
+
+
+def sample_boundary_points(n_inlet, n_wall, domain, device):
+    r_inlet = (
+        torch.rand(n_inlet, device=device, dtype=torch.float64)
+        * (domain["r_max"] - domain["r_min"])
+        + domain["r_min"]
+    )
+    x_inlet = torch.full_like(r_inlet, domain["x_min"])
+
+    x_wall = (
+        torch.rand(2 * n_wall, device=device, dtype=torch.float64)
+        * (domain["x_max"] - domain["x_min"])
+        + domain["x_min"]
+    )
+    r_wall = torch.cat([
+        torch.full((n_wall,), domain["r_min"], device=device, dtype=torch.float64),
+        torch.full((n_wall,), domain["r_max"], device=device, dtype=torch.float64),
+    ])
+
+    return {
+        "x_inlet": x_inlet,
+        "r_inlet": r_inlet,
+        "x_wall":  x_wall,
+        "r_wall":  r_wall,
+    }
+
+
+def _grad(u, var):
+    return torch.autograd.grad(
+        u.sum(), var, create_graph=True, retain_graph=True
+    )[0]
+
+
+def compute_B_components(x, r, physics):
+    if physics.get("magnetic_field_model") == "flux_2d":
+        from field import B
+        return B(x, r)
+    return torch.zeros_like(x), compute_Br(x, physics)
+
+
+def compute_Br(x, physics):
+    return physics["B_max"] * torch.exp(
+        -((x - physics["x_B"]) ** 2) / (physics["sigma_B"] ** 2)
+    )
+
+
+# =========================================================
+# Physics — ionization rate and source term
+# =========================================================
+
+def compute_ki(Te_norm, physics):
+    Te_eV    = Te_norm * physics["phi_ref"]
+    Te_floor = physics["ki_floor_eV"]
+    beta     = physics["ki_softplus_beta"]
+    Te_eff   = Te_floor + F.softplus(beta * (Te_eV - Te_floor)) / beta
+
+    ki_phys = (
+        1.9435e-5 * Te_eff**3
+        - 0.0068  * Te_eff**2
+        + 0.6705  * Te_eff
+        - 1.6329
+    ) * 1e-14
+
+    # Polynomial can go negative for some Te ranges — clamp to 0 first.
+    ki_phys = torch.clamp(ki_phys, min=0.0)
+
+    # Smooth low-Te taper: Xe ionization is negligible below about 5 eV, but
+    # the previous hard cutoff injected a discontinuous Si jump into continuity.
+    taper_center = physics.get("ki_taper_center_eV", 5.0)
+    taper_width = physics.get("ki_taper_width_eV", 0.35)
+    taper = torch.sigmoid((Te_eff - taper_center) / taper_width)
+    ki_phys = ki_phys * taper
+
+    ki_pos = torch.clamp(ki_phys, min=1e-30)
+    return physics["ki_scale"] * ki_pos / physics["k_ref"]
+
+
+def compute_Si(nn_, ne, Te_norm, physics):
+    ki_hat = compute_ki(Te_norm, physics)
+    return ki_hat * nn_ * ne
+
+
+def compute_ion_neutral_frequency(nn_, Vix, physics):
+    """Local Xe+–Xe rate [s^-1], using the task-specified Miller (2002) fit.
+
+    No detach: density and relative velocity remain in the training graph.
+    Clamp the unfloored relative energy to 1–300 eV for the cross section;
+    apply the neutral thermal speed floor only to the rate's speed factor.
+    """
+    relative_velocity = (Vix - physics["Vn"]) * physics["V_ref"]
+    energy_eV = 0.5 * physics["mi"] * relative_velocity.square() / physics["e_phys"]
+    sigma_cex = (87.3 - 13.6 * torch.log10(torch.clamp(energy_eV, min=1.0, max=300.0))) * 1.0e-20
+    v_floor = float(np.sqrt(8.0 * physics["Tn_eV"] * physics["e_phys"] / (np.pi * physics["mn"])))
+    speed = torch.clamp(relative_velocity.abs(), min=v_floor)
+    return nn_ * physics["n_ref"] * sigma_cex * speed
+
+
+def compute_collision_frequencies(ne, nn_, Te_norm, physics):
+    """Return electron collision frequencies in Hz and normalized forms.
+
+    nu_hat_momentum uses the legacy v26 Hall-momentum scale nu_ref.
+    nu_hat_energy uses L/V_ref because the energy equation is written against
+    dimensionless spatial convection terms.
+    """
+    Te_eV = torch.clamp(Te_norm * physics["phi_ref"], min=0.05)
+    ne_phys = torch.clamp(ne, min=1e-12) * physics["n_ref"]
+    nn_phys = torch.clamp(nn_, min=1e-12) * physics["n_ref"]
+
+    ne_cm3 = ne_phys / 1.0e6
+    coulomb_log = physics.get("coulomb_log", 10.0)
+    nu_ei = 2.91e-6 * ne_cm3 * coulomb_log / torch.clamp(Te_eV, min=0.05).pow(1.5)
+
+    sigma_en = physics.get("sigma_en", 2.5e-19)
+    e_phys = physics["e_phys"]
+    me = physics["me"]
+    vth_e = torch.sqrt(8.0 * Te_eV * e_phys / (np.pi * me))
+    nu_en = nn_phys * sigma_en * vth_e
+
+    nu_total = nu_ei + nu_en
+    nu_hat_momentum = nu_total / physics["nu_ref"]
+    nu_hat_energy = nu_total * physics.get("tau_ref", physics["L_canal"] / physics["V_ref"])
+    return {
+        "nu_ei": nu_ei,
+        "nu_en": nu_en,
+        "nu_total": nu_total,
+        "nu_hat_momentum": nu_hat_momentum,
+        "nu_hat_energy": nu_hat_energy,
+    }
+
+
+# =========================================================
+# Normalization audit — run BEFORE training
+# =========================================================
+
+def debug_scales(model, x_f, r_f, physics):
+    print("\n" + "=" * 65)
+    print("NORMALIZATION AUDIT — mean |term| at initialization")
+    print("All ratios should be O(0.1) to O(10). Fix normalization if not.")
+    print("=" * 65)
+
+    model.eval()
+
+    phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, eta = model(x_f, r_f)
+    Si = compute_Si(nn_, ne, Te, physics)
+    coll = compute_collision_frequencies(ne, nn_, Te, physics)
+    ki = compute_ki(Te, physics)
+
+    # --- Poisson (ambipolar formulation) ---
+    phi_x  = _grad(phi, x_f)
+    phi_r  = _grad(phi, r_f)
+    phi_xx = _grad(phi_x, x_f)
+    phi_rr = _grad(phi_r, r_f)
+    laplace_phi = phi_xx + phi_rr + phi_r / r_f
+    # Residual: ∇²φ̂ - alpha*ni*eta = 0  (from ∇²φ = -α(ni-ne), ne-ni = ni*eta).
+    # We inspect the alpha-normalized equation, then train it scaled by eta_max
+    # below so eta cannot be ignored just because alpha is large.
+    lhs_poisson = laplace_phi / physics["alpha"]
+    rhs_poisson = ni * eta
+
+    # --- Ion continuity ---
+    ni_x    = _grad(ni, x_f)
+    ni_r    = _grad(ni, r_f)
+    niVix_x = _grad(ni * Vix, x_f)
+    niVir_r = _grad(ni * Vir, r_f)
+    transport = niVix_x + niVir_r + ni * Vir / r_f
+
+    # --- Neutral continuity (rate form) ---
+    log_nn     = torch.log(torch.clamp(nn_, min=1e-8))
+    dlog_nn_dx = _grad(log_nn, x_f)
+    neut_conv  = physics["Vn"] * dlog_nn_dx
+
+    def mag(t):
+        return t.detach().abs().mean().item()
+
+    def ratio(a, b):
+        denom = mag(b)
+        return mag(a) / denom if denom > 1e-30 else float("inf")
+
+    print(f"\n[AMBIPOLAR DEVIATION eta]")
+    print(f"  |eta| mean            : {mag(eta):.3e}  (bound: {model.eta_max:.1e})")
+    print(f"  ne/ni - 1 max         : {((ne/ni - 1).detach().abs().max()).item():.3e}")
+
+    print(f"\n[POISSON — ambipolar] ∇²φ̂/α - n̂i*η = 0")
+    print(f"  ∇²φ̂ / α               : {mag(lhs_poisson):.3e}")
+    print(f"  n̂i * η                : {mag(rhs_poisson):.3e}")
+    print(f"  scaled residual        : {mag((lhs_poisson-rhs_poisson)/model.eta_max):.3e}")
+    print(f"  ratio lhs/rhs         : {ratio(lhs_poisson, rhs_poisson):.3e}  ← target O(1)")
+    print(f"  If rhs << lhs: eta_max too small — increase to 1e-4 or 1e-3")
+
+    print(f"\n[ION MOMENTUM — hard-wired via energy conservation]")
+    print(f"  Vix range             : [{Vix.detach().min().item():.3f}, {Vix.detach().max().item():.3f}]")
+
+    print(f"\n[ION CONTINUITY]")
+    print(f"  div(ni * Vi)          : {mag(transport):.3e}")
+    print(f"  source Si             : {mag(Si):.3e}")
+    print(f"  ratio Si/transport    : {ratio(Si, transport):.3e}  ← target O(1)")
+
+    print(f"\n[NEUTRAL CONTINUITY — rate form]")
+    print(f"  Vn * d(log nn)/dx     : {mag(neut_conv):.3e}")
+    print(f"  ki * ni               : {mag(ki*ni):.3e}")
+    print(f"  ratio (ki*ni)/conv    : {ratio(ki*ni, neut_conv):.3e}  ← target O(1)")
+
+    print(f"\n[FIELD MAGNITUDES — normalized units]")
+    print(f"  ni                    : {mag(ni):.3e}  (inlet = {physics['ni_inlet']:.3f})")
+    print(f"  ne                    : {mag(ne):.3e}")
+    print(f"  nn                    : {mag(nn_):.3e}  (inlet = {physics['nn_inlet']:.3f})")
+    print(f"  Te_norm               : {mag(Te):.3e}  ({mag(Te)*physics['phi_ref']:.2f} eV)")
+    print(f"  ki_hat                : {mag(ki):.3e}")
+    print(f"  Si_hat                : {mag(Si):.3e}")
+
+    print("\n[DIAGNOSTIC GUIDE]")
+    print("  Poisson ratio lhs/rhs >> 1  → eta_max too small, raise to 1e-4")
+    print("  Poisson ratio lhs/rhs << 1  → eta is too free, lower eta_max")
+    print("  Si/transport >> 10          → ionization dominates, ni peak expected")
+    print("  ki_hat >> 100               → normalization broken, STOP")
+    print("=" * 65 + "\n")
+
+    model.train()
+
+
+# =========================================================
+# Loss computation
+# =========================================================
+
+def compute_equation_residuals(model, x, r, physics):
+    """Compute the shared interior physics residuals without reducing them.
+
+    Training and validation intentionally differ only after this function:
+    training reduces these tensors on its sampled collocation points and applies
+    loss weights, while validation reduces them without weights on its fixed grid.
+    """
+    phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, eta = model(x, r)
+
+    Si = compute_Si(nn_, ne, Te, physics)
+    coll = compute_collision_frequencies(ne, nn_, Te, physics)
+
+    phi_x = _grad(phi, x)
+    phi_r = _grad(phi, r)
+    phi_xx = _grad(phi_x, x)
+    phi_rr = _grad(phi_r, r)
+
+    ni_x = _grad(ni, x)
+    ni_r = _grad(ni, r)
+    niVix_x = _grad(ni * Vix, x)
+    niVir_r = _grad(ni * Vir, r)
+
+    neVex_x = _grad(ne * Vex, x)
+    neVer_r = _grad(ne * Ver, r)
+    energy_flux_x = _grad(ne * Vex * 2.5 * Te, x)
+    energy_flux_r = _grad(ne * Ver * 2.5 * Te, r)
+
+    laplace_phi = phi_xx + phi_rr + phi_r / r
+    res_poisson = (laplace_phi / physics["alpha"] - ni * eta) / model.eta_max
+
+    res_ion_cont_raw = niVix_x + niVir_r + ni * Vir / r - Si
+    ion_cont_scale = physics.get("ion_cont_scale", 1.0)
+    res_ion_cont = res_ion_cont_raw / ion_cont_scale
+
+    nn_x = _grad(nn_, x)
+    res_neut_cont = physics["Vn"] * nn_x + Si
+    res_elec_cont = neVex_x + neVer_r + ne * Ver / r - Si
+
+    Ti = torch.full_like(Te, physics.get("Ti_eV", 0.025) / physics["phi_ref"])
+    Tn = torch.full_like(Te, physics.get("Tn_eV", 0.025) / physics["phi_ref"])
+    alpha_E = physics.get("energy_alpha", 1.0)
+    eps_i = physics.get("eps_i", 1.0)
+    tau_ref = physics.get("tau_ref", physics["L_canal"] / physics["V_ref"])
+    nu_ei_E = coll["nu_ei"] * tau_ref
+    nu_en_E = coll["nu_en"] * tau_ref
+    energy_rhs = (
+        3.0 * (physics["me"] / physics["mi"]) * ne * nu_ei_E * (Ti - Te)
+        + 3.0 * (physics["me"] / physics["mn"]) * ne * nu_en_E * (Tn - Te)
+        + Si * (1.5 * Te + alpha_E * eps_i)
+    )
+    res_energy_raw = (
+        energy_flux_x + energy_flux_r + ne * Ver * 2.5 * Te / r
+        - ne * Vex * phi_x - ne * Ver * phi_r
+        - energy_rhs
+    )
+    energy_scale = physics.get("energy_scale", 1.0)
+    res_energy = res_energy_raw / energy_scale
+
+    niVix2_x = _grad(ni * Vix * Vix, x)
+    niVixVir_x = _grad(ni * Vix * Vir, x)
+    niVixVir_r = _grad(ni * Vix * Vir, r)
+    niVir2_r = _grad(ni * Vir * Vir, r)
+    ion_electric_x = ni * phi_x
+    ion_electric_r = ni * phi_r
+    nu_in_hat = compute_ion_neutral_frequency(nn_, Vix, physics) * tau_ref
+    ion_neutral_factor = (physics["mn"] / physics["mi"]) * nu_in_hat
+    electron_drag_force_x = ni * (physics["me"] / physics["mi"]) * coll["nu_total"] * tau_ref * (Vex - Vix)
+    electron_drag_force_r = ni * (physics["me"] / physics["mi"]) * coll["nu_total"] * tau_ref * (Ver - Vir)
+    electron_drag_residual_x = -electron_drag_force_x
+    electron_drag_residual_r = -electron_drag_force_r
+    ion_neutral_friction_x = ni * ion_neutral_factor * (Vix - physics["Vn"])
+    ionization_momentum_x = -Si * physics["Vn"]
+    ion_neutral_friction_r = ni * ion_neutral_factor * Vir
+    ionization_momentum_r = torch.zeros_like(Vir)
+    res_ion_mom_x_raw = (
+        niVix2_x + niVixVir_r + ni * Vix * Vir / r
+        + ion_electric_x
+        + electron_drag_residual_x
+        + ion_neutral_friction_x
+        + ionization_momentum_x
+    )
+    res_ion_mom_r_raw = (
+        niVixVir_x + niVir2_r + ni * Vir * Vir / r
+        + ion_electric_r
+        + electron_drag_residual_r
+        + ion_neutral_friction_r
+        + ionization_momentum_r
+    )
+    ion_mom_scale = physics.get("ion_mom_scale", 1.0)
+    res_ion_mom_x = res_ion_mom_x_raw / ion_mom_scale
+    res_ion_mom_r = res_ion_mom_r_raw / ion_mom_scale
+
+
+    Bx, Br = compute_B_components(x, r, physics)
+    momentum_mass_ratio = physics["me"] / physics["mi"]
+    momentum_tau_ref = physics.get("tau_ref", physics["L_canal"] / physics["V_ref"])
+    omega_ce = physics["e_over_me"] * torch.sqrt(Bx.square() + Br.square())
+    omega_r = physics["e_over_me"] * Br
+    omega_x = physics["e_over_me"] * Bx
+    nu_momentum = coll["nu_total"] + physics["alpha_B"] * omega_ce
+    omega_ce_hat = momentum_mass_ratio * omega_ce * momentum_tau_ref
+    omega_r_hat = momentum_mass_ratio * omega_r * momentum_tau_ref
+    omega_x_hat = momentum_mass_ratio * omega_x * momentum_tau_ref
+    nu_hat_momentum_consistent = momentum_mass_ratio * nu_momentum * momentum_tau_ref
+    # Roy 3 Nov: field-aligned transport tensor. nu_par = nu_ei + nu_en (classical), nu_perp = nu_par + alpha_B*omega_ce.
+    # b has no azimuthal component, so the theta drag uses nu_perp and the poloidal drag is
+    # nu_perp*V + (nu_par - nu_perp)*(b.V)b. The Hall (Lorentz) terms are unchanged: no double counting.
+    _tensor = physics.get("transport_tensor", False)
+    _Bmag = torch.sqrt(Bx.square() + Br.square())
+    _bx, _br = Bx / _Bmag, Br / _Bmag
+    nu_par_phys = coll["nu_total"] if _tensor else nu_momentum
+    nu_hat_par = momentum_mass_ratio * nu_par_phys * momentum_tau_ref
+    nu_hat_perp = nu_hat_momentum_consistent
+    _Vpar = _bx * Vex + _br * Ver
+    drag_x = ne * (nu_hat_perp * Vex + (nu_hat_par - nu_hat_perp) * _Vpar * _bx)
+    drag_r = ne * (nu_hat_perp * Ver + (nu_hat_par - nu_hat_perp) * _Vpar * _br)
+    drag_t = ne * nu_hat_perp * Vetheta
+    Vex_x = _grad(Vex, x)
+    Vex_r = _grad(Vex, r)
+    Ver_x = _grad(Ver, x)
+    Ver_r = _grad(Ver, r)
+    Vetheta_x = _grad(Vetheta, x)
+    Vetheta_r = _grad(Vetheta, r)
+    res_elec_mom_x = (
+        momentum_mass_ratio * (ne * Vex * Vex_x + ne * Ver * Vex_r)
+        - ne * phi_x
+        - omega_r_hat * ne * Vetheta
+        + drag_x
+    )
+    res_elec_mom_r = (
+        momentum_mass_ratio * (ne * Vex * Ver_x + ne * Ver * Ver_r)
+        - ne * phi_r
+        + omega_x_hat * ne * Vetheta
+        + drag_r
+    )
+    res_elec_mom_theta = (
+        momentum_mass_ratio * (ne * Vex * Vetheta_x + ne * Ver * Vetheta_r)
+        + omega_r_hat * ne * Vex - omega_x_hat * ne * Ver
+        + drag_t
+    )
+
+    if physics.get("electron_pressure", False):
+        # electron pressure gradient, normalized coefficient 1 (phi_ref = T*)
+        pe = ne * Te
+        res_elec_mom_x = res_elec_mom_x + _grad(pe, x)
+        res_elec_mom_r = res_elec_mom_r + _grad(pe, r)
+    # Roy 1 Nov: normalized field-aligned projection of the full retained electron
+    # momentum equation (inertia, electric, pressure, drag; Lorentz term has no b-component).
+    _Bm = torch.sqrt(Bx.square() + Br.square())
+    res_elec_par = ((Bx / _Bm) * res_elec_mom_x + (Br / _Bm) * res_elec_mom_r) / ne \
+        * (physics["phi_ref"] / physics["L_canal"]) / physics.get("E_ref_par", 1200.0)
+    # Roy 2 Nov 22:03: mobility-weighted parallel residual, u = e R_par / (m_e nu_par), with nu_par the
+    # momentum-transfer frequency of the electron equations (as implemented: classical + Bohm), in units of V_par_ref.
+    res_elec_par_mob = res_elec_par * physics.get("E_ref_par", 1200.0) * physics["e_phys"] \
+        / (physics["me"] * nu_par_phys) / physics.get("V_par_ref", 1.0e6)
+    # Roy 3 Nov 13:07: current-equivalent local residual, R_par / R_allow with
+    # R_allow = m_e nu_par J_allow / (e^2 n_e), i.e. the parallel force error that drives J_allow along B.
+    _ne_SI = torch.clamp(ne, min=1e-12) * physics["n_ref"]
+    R_allow = physics["me"] * nu_par_phys * physics.get("J_allow", 47.4) / (physics["e_phys"] ** 2 * _ne_SI)
+    res_elec_par_J = res_elec_par * physics.get("E_ref_par", 1200.0) / R_allow
+    if physics.get("electron_momentum_form", "force") == "velocity":
+        # Velocity form: apply the inverse of the linear operator
+        # M = ne*[[nu, 0, -wr], [0, nu, wx], [wr, -wx, nu]] (hats) so that the residual
+        # equals Ve - V_DD (+ M^-1 inertia), in units of V_ref. A force imbalance
+        # along B is then penalized according to the velocity/current it drives.
+        nu_ = nu_hat_momentum_consistent; z_ = torch.zeros_like(nu_)
+        M = torch.stack([nu_, z_, -omega_r_hat, z_, nu_, omega_x_hat,
+                         omega_r_hat, -omega_x_hat, nu_], dim=-1).reshape(-1, 3, 3) * ne.reshape(-1, 1, 1)
+        R = torch.stack([res_elec_mom_x, res_elec_mom_r, res_elec_mom_theta], dim=-1).reshape(-1, 3, 1)
+        Vres = torch.linalg.solve(M, R).reshape(-1, 3)
+        res_elec_mom_x = Vres[:, 0].reshape(res_elec_mom_x.shape)
+        res_elec_mom_r = Vres[:, 1].reshape(res_elec_mom_r.shape)
+        res_elec_mom_theta = Vres[:, 2].reshape(res_elec_mom_theta.shape)
+
+    return {
+        "fields": (phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, eta),
+        "poisson": res_poisson,
+        "ion_cont_raw": res_ion_cont_raw,
+        "ion_cont": res_ion_cont,
+        "neut_cont": res_neut_cont,
+        "elec_cont": res_elec_cont,
+        "energy": res_energy,
+        "ion_mom_x": res_ion_mom_x,
+        "ion_mom_r": res_ion_mom_r,
+        "elec_mom_x": res_elec_mom_x,
+        "elec_mom_r": res_elec_mom_r,
+        "elec_mom_theta": res_elec_mom_theta,
+        "elec_par": res_elec_par,
+        "elec_par_mob": res_elec_par_mob,
+        "elec_par_J": res_elec_par_J,
+        "R_allow": R_allow,
+        "Si": Si,
+        "coll": coll,
+        "phi_rr": phi_rr,
+        "ni_r": ni_r,
+        "ion_cont_scale": ion_cont_scale,
+        "energy_scale": energy_scale,
+        "ion_mom_scale": ion_mom_scale,
+        "ion_electric_x": ion_electric_x,
+        "nu_in_hat": nu_in_hat,
+        "ion_neutral_friction_x": ion_neutral_friction_x,
+        "ionization_momentum_x": ionization_momentum_x,
+        "electron_drag_residual_x": electron_drag_residual_x,
+        "omega_ce_hat": omega_ce_hat,
+    }
+
+
+def compute_all_losses(model, x, r, boundary_data, domain, physics, weights):
+    """
+    Loss function for the 2D cylindrical HET PINN with AMBIPOLAR Poisson.
+
+    Equations solved:
+      - Poisson (ambipolar): ∇²φ̂ - α*n̂i*η = 0
+      - Ion continuity:      ∂x(n̂i V̂ix) + ∂r(n̂i V̂ir) + n̂i V̂ir/r - Ŝi = 0
+      - Neutral continuity:  ∂x(V̂n n̂n) + Ŝi = 0   [flux form, V̂n constant]
+      - Electron continuity: ∂x(n̂e V̂ex) + ∂r(n̂e V̂er) + n̂e V̂er/r - Ŝi = 0
+      - Ion momentum:      conservative 2D momentum with distributed birth source
+      - BCs: nn_inlet, Vetheta_inlet, Vir/Ver walls, integrated current/conservation, nn_exit_target
+
+    ne = ni*(1+eta) enforced in model.forward.
+    Vix is a solved positive network output with hard anode inlet.
+    """
+    equation = compute_equation_residuals(model, x, r, physics)
+    phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, eta = equation["fields"]
+    res_poisson = equation["poisson"]
+    res_ion_cont_raw = equation["ion_cont_raw"]
+    res_ion_cont = equation["ion_cont"]
+    res_neut_cont = equation["neut_cont"]
+    res_elec_cont = equation["elec_cont"]
+    res_energy = equation["energy"]
+    res_ion_mom_x = equation["ion_mom_x"]
+    res_ion_mom_r = equation["ion_mom_r"]
+    res_elec_mom_x = equation["elec_mom_x"]
+    res_elec_mom_r = equation["elec_mom_r"]
+    res_elec_mom_theta = equation["elec_mom_theta"]
+    res_elec_par = equation["elec_par"]
+    res_elec_par_mob = equation["elec_par_mob"]
+    res_elec_par_J = equation["elec_par_J"]
+    Si = equation["Si"]
+    coll = equation["coll"]
+    phi_rr = equation["phi_rr"]
+    ni_r = equation["ni_r"]
+    ion_cont_scale = equation["ion_cont_scale"]
+    energy_scale = equation["energy_scale"]
+    ion_mom_scale = equation["ion_mom_scale"]
+    ion_electric_x = equation["ion_electric_x"]
+    nu_in_hat = equation["nu_in_hat"]
+    ion_neutral_friction_x = equation["ion_neutral_friction_x"]
+    ionization_momentum_x = equation["ionization_momentum_x"]
+    electron_drag_residual_x = equation["electron_drag_residual_x"]
+
+    loss_poisson   = (res_poisson   ** 2).mean()
+    loss_ion_cont_raw = (res_ion_cont_raw ** 2).mean()
+    loss_ion_cont  = (res_ion_cont  ** 2).mean()
+    loss_neut_cont = (res_neut_cont ** 2).mean()
+    loss_elec_cont = (res_elec_cont ** 2).mean()
+    loss_energy    = (res_energy    ** 2).mean()
+    loss_ion_mom_x = (res_ion_mom_x ** 2).mean()
+    loss_ion_mom_r = (res_ion_mom_r ** 2).mean()
+    loss_elec_mom_x     = (res_elec_mom_x     ** 2).mean()
+    loss_elec_mom_r     = (res_elec_mom_r     ** 2).mean()
+    loss_elec_mom_theta = (res_elec_mom_theta ** 2).mean()
+    loss_elec_par = (res_elec_par ** 2).mean()
+    loss_elec_par_mob = (res_elec_par_mob ** 2).mean()
+    loss_elec_par_J = (res_elec_par_J ** 2).mean()
+
+    # --- Boundary conditions ---
+    x_in = boundary_data["x_inlet"]
+    r_in = boundary_data["r_inlet"]
+    x_w  = boundary_data["x_wall"]
+    r_w  = boundary_data["r_wall"]
+
+    _, ni_in, _, _, nn_in, _, _, _, _, Vetheta_in, _ = model(x_in, r_in)
+    _, _,     _, Vir_w, _, _, _, Ver_w, _, _,      _ = model(x_w,  r_w)
+
+    ni_inlet_val  = physics["ni_inlet"]
+    ni_in_safe    = torch.clamp(ni_in, min=1e-10)
+    loss_ni_inlet = (torch.log(ni_in_safe / ni_inlet_val)).pow(2).mean()
+    loss_nn_inlet      = ((nn_in      - physics["nn_inlet"])     ** 2).mean()
+    loss_Vetheta_inlet = ((Vetheta_in - physics["Vetheta_inlet"]) ** 2).mean()
+    loss_Vir_wall = (Vir_w ** 2).mean()
+    loss_Ver_wall = (Ver_w ** 2).mean()
+    integrated = integrated_balances(model, domain, physics)
+    loss_integrated_current = integrated["current_residual"].square().mean()
+    loss_integrated_neutral = integrated["neutral_residual"].square().mean()
+    loss_integrated_ion = integrated["ion_residual"].square().mean()
+
+    # --- nn_exit constraint: force >95% ionization ---
+    nn_exit_target = physics.get("nn_exit_target", -1.0)
+    if nn_exit_target > 0:
+        x_exit = torch.full_like(r_in, domain["x_max"])
+        _, _, _, _, nn_ex, _, _, _, _, _, _ = model(x_exit, r_in)
+        excess = torch.relu(nn_ex - nn_exit_target)
+        loss_nn_exit = (excess ** 2).mean()
+    else:
+        loss_nn_exit = torch.tensor(0.0, dtype=phi.dtype)
+
+    # --- Radial smoothness regularizers (suppress high-freq oscillations in r) ---
+    # These use only second radial derivatives so sharp axial gradients such as
+    # the acceleration zone remain unconstrained.
+    Te_r = _grad(Te, r)
+    Te_rr = _grad(Te_r, r)
+    ni_rr = _grad(ni_r, r)
+    nn_r  = _grad(nn_, r)
+    nn_rr = _grad(nn_r, r)
+    loss_smooth_phi = (phi_rr ** 2).mean()
+    # Er = -dphi/dr, so dEr/dr = -d2phi/dr2. Keep this separate from
+    # smooth_phi so the Er-targeted penalty can be weighted/reported on its own.
+    loss_smooth_Er = (phi_rr ** 2).mean()
+    loss_smooth_ni = (ni_rr ** 2).mean()
+    loss_smooth_nn = (nn_rr ** 2).mean()
+    loss_smooth_Te = (Te_rr ** 2).mean()
+
+    total = (
+          weights["poisson"]       * loss_poisson
+        + weights["ion_cont"]      * loss_ion_cont
+        + weights["neut_cont"]     * loss_neut_cont
+        + weights["elec_cont"]     * loss_elec_cont
+        + weights.get("energy",    0.0) * loss_energy
+        + weights["ion_mom_x"]     * loss_ion_mom_x
+        + weights.get("ion_mom_r", 0.0) * loss_ion_mom_r
+        + weights["ni_inlet"]      * loss_ni_inlet
+        + weights["nn_inlet"]      * loss_nn_inlet
+        + weights["Vetheta_inlet"] * loss_Vetheta_inlet
+        + weights["Vir_wall"]      * loss_Vir_wall
+        + weights["Ver_wall"]      * loss_Ver_wall
+        + weights["integrated_current"] * loss_integrated_current
+        + weights["integrated_neutral"] * loss_integrated_neutral
+        + weights["integrated_ion"] * loss_integrated_ion
+        + weights.get("nn_exit",   0.0) * loss_nn_exit
+        + weights.get("smooth_ni", 0.0) * loss_smooth_ni
+        + weights.get("smooth_nn", 0.0) * loss_smooth_nn
+        + weights.get("smooth_phi", 0.0) * loss_smooth_phi
+        + weights.get("smooth_Er", 0.0) * loss_smooth_Er
+        + weights.get("smooth_Te", 0.0) * loss_smooth_Te
+        + weights.get("elec_mom_x",     0.0) * loss_elec_mom_x
+        + weights.get("elec_mom_r",     0.0) * loss_elec_mom_r
+        + weights.get("elec_mom_theta", 0.0) * loss_elec_mom_theta
+        + weights.get("elec_par", 0.0) * loss_elec_par
+        + weights.get("elec_par_mob", 0.0) * loss_elec_par_mob
+        + weights.get("elec_par_J", 0.0) * loss_elec_par_J
+    )
+
+    loss_dict = {
+        "total":          total.item(),
+        "poisson":        loss_poisson.item(),
+        "ion_cont":       loss_ion_cont.item(),
+        "ion_cont_raw":   loss_ion_cont_raw.item(),
+        "ion_cont_raw_RMS": math.sqrt(max(loss_ion_cont_raw.item(), 0.0)),
+        "neut_cont":      loss_neut_cont.item(),
+        "elec_cont":      loss_elec_cont.item(),
+        "energy":         loss_energy.item(),
+        "ion_mom_x":      loss_ion_mom_x.item(),
+        "ion_mom_r":      loss_ion_mom_r.item(),
+        "elec_mom_x":     loss_elec_mom_x.item(),
+        "elec_mom_r":     loss_elec_mom_r.item(),
+        "elec_mom_theta": loss_elec_mom_theta.item(),
+        "elec_par":       loss_elec_par.item(),
+        "elec_par_mob":   loss_elec_par_mob.item(),
+        "elec_par_J":     loss_elec_par_J.item(),
+        "ni_inlet":       loss_ni_inlet.item(),
+        "nn_inlet":       loss_nn_inlet.item(),
+        "Vetheta_inlet":  loss_Vetheta_inlet.item(),
+        "Vir_wall":       loss_Vir_wall.item(),
+        "Ver_wall":       loss_Ver_wall.item(),
+        "integrated_current": loss_integrated_current.item(),
+        "integrated_neutral": loss_integrated_neutral.item(),
+        "integrated_ion": loss_integrated_ion.item(),
+        "nn_exit":        loss_nn_exit.item(),
+        "smooth_ni":      loss_smooth_ni.item(),
+        "smooth_nn":      loss_smooth_nn.item(),
+        "smooth_phi":     loss_smooth_phi.item(),
+        "smooth_Er":      loss_smooth_Er.item(),
+        "smooth_Te":      loss_smooth_Te.item(),
+        "Id_mean_A": float(integrated["Id_A"].detach().mean()),
+        "Si_mean":        Si.mean().item(),
+        "nu_ei_mean_Hz":  coll["nu_ei"].detach().mean().item(),
+        "nu_en_mean_Hz":  coll["nu_en"].detach().mean().item(),
+        "energy_scale":   float(energy_scale),
+        "ion_mom_scale":  float(ion_mom_scale),
+        "ion_cont_scale": float(ion_cont_scale),
+        "ion_electric_x_abs_mean": ion_electric_x.detach().abs().mean().item(),
+        "nu_in_hat": float(nu_in_hat.detach().mean().item()),
+        "ion_friction_x_abs_mean": (
+            ion_neutral_friction_x + ionization_momentum_x + electron_drag_residual_x
+        ).detach().abs().mean().item(),
+        "ion_neutral_friction_x_mean": ion_neutral_friction_x.detach().mean().item(),
+        "ionization_momentum_x_mean": ionization_momentum_x.detach().mean().item(),
+        "electron_drag_x_mean": electron_drag_residual_x.detach().mean().item(),
+        "ion_friction_over_electric_x": (
+            (ion_neutral_friction_x + ionization_momentum_x + electron_drag_residual_x).detach().abs().mean()
+            / torch.clamp(ion_electric_x.detach().abs().mean(), min=1e-30)
+        ).item(),
+        "eta_abs_mean":   eta.detach().abs().mean().item(),
+        "eta_abs_max":    eta.detach().abs().max().item(),
+    }
+
+    return total, loss_dict
+
+
+# =========================================================
+# Auto-balanced loss weights
+# =========================================================
+
+def compute_auto_weights(model, x_f, r_f, boundary_data, domain, physics, max_weight=100.0):
+    model.eval()
+
+    unit_weights = {
+        "poisson":        1.0,
+        "ion_cont":       1.0,
+        "neut_cont":      1.0,
+        "elec_cont":      1.0,
+        "energy":         1.0,
+        "ion_mom_x":      1.0,
+        "ion_mom_r":      1.0,
+        "ni_inlet":       1.0,
+        "nn_inlet":       1.0,
+        "Vetheta_inlet":  1.0,
+        "Vir_wall":       1.0,
+        "Ver_wall":       1.0,
+        "integrated_current":      1.0,
+        "nn_exit":        1.0,
+        "smooth_ni":      1.0,
+        "smooth_nn":      1.0,
+        "smooth_phi":     1.0,
+        "smooth_Te":      1.0,
+        "elec_mom_x":     1.0,
+        "elec_mom_r":     1.0,
+        "elec_mom_theta": 1.0,
+    }
+
+    _, loss_dict = compute_all_losses(
+        model, x_f, r_f, boundary_data, domain, physics, unit_weights
+    )
+
+    raw_w = {k: 1.0 / (loss_dict[k] + 1e-10) for k in unit_weights}
+    max_w = max(raw_w.values())
+    scale = max_weight / max_w
+    MIN_WEIGHT = 1.0
+    auto_weights = {k: max(v * scale, MIN_WEIGHT) for k, v in raw_w.items()}
+
+    model.train()
+    return auto_weights
+
+
+# =========================================================
+# Training loop
+# =========================================================
+
+def _init_history():
+    keys = [
+        "total", "poisson",
+        "ion_cont", "neut_cont", "elec_cont", "ion_mom_x", "ion_mom_r",
+        "ni_inlet", "nn_inlet", "Vetheta_inlet",
+        "Vir_wall", "Ver_wall", "integrated_current", "Id_mean_A", "Si_mean",
+        "nn_exit", "smooth_ni", "smooth_nn", "smooth_phi", "smooth_Te",
+        "eta_abs_mean", "eta_abs_max",
+        "ni_mean", "ni_std",
+    ]
+    return {k: [] for k in keys}
+
+
+def train_adam(
+    model, x_f, r_f, boundary_data, domain, physics,
+    epochs, lr, weights, print_every=500
+):
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=300, min_lr=1e-6
+    )
+    history = _init_history()
+
+    best_loss = float("inf")
+    stagnation_counter = 0
+
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        total, loss_dict = compute_all_losses(
+            model, x_f, r_f, boundary_data, domain, physics, weights
+        )
+        total.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        scheduler.step(loss_dict["total"])
+
+        for k in history:
+            if k not in ("ni_mean", "ni_std") and k in loss_dict:
+                history[k].append(loss_dict[k])
+
+        if epoch % print_every == 0:
+            with torch.no_grad():
+                x_check = x_f.detach()
+                r_check = r_f.detach()
+                _, ni_c, _, _, _, _, _, _, _, _, _ = model(x_check, r_check)
+
+            ni_mean = ni_c.mean().item()
+            ni_std  = ni_c.std().item()
+            xi_check = (x_check - domain["x_min"]) / (domain["x_max"] - domain["x_min"])
+            interior_mask = (xi_check > 0.05)
+            ni_int_max = ni_c[interior_mask].max().item() if interior_mask.any() else ni_mean
+
+            history["ni_mean"].append(ni_mean)
+            history["ni_std"].append(ni_std)
+
+            flags = []
+            if ni_mean < 1e-3:
+                flags.append("⚠  DENSITY COLLAPSE")
+            current_loss = loss_dict["total"]
+            if current_loss < best_loss * 0.99:
+                best_loss = current_loss
+                stagnation_counter = 0
+            else:
+                stagnation_counter += 1
+            if stagnation_counter >= 3 and epoch > print_every:
+                flags.append("⚠  STAGNATION")
+            flag_str = "  " + " | ".join(flags) if flags else ""
+            current_lr = optimizer.param_groups[0]['lr']
+
+            print(
+                f"Epoch {epoch:5d} | "
+                f"Total: {loss_dict['total']:.4f} | "
+                f"Poisson: {loss_dict['poisson']:.3e} | "
+                f"IonCont: {loss_dict['ion_cont']:.4f} | "
+                f"NeutCont: {loss_dict['neut_cont']:.4f} | "
+                f"|η|: {loss_dict['eta_abs_mean']:.2e} | "
+                f"Id mean [A]: {loss_dict['Id_mean_A']:.4f} | "
+                f"ni int_max={ni_int_max:.3f} | "
+                f"lr={current_lr:.2e}"
+                + flag_str
+            )
+        else:
+            history["ni_mean"].append(history["ni_mean"][-1] if history["ni_mean"] else 0.0)
+            history["ni_std"].append(history["ni_std"][-1]   if history["ni_std"]  else 0.0)
+
+    return history
+
+
+# =========================================================
+# Evaluation
+# =========================================================
+
+def compute_validation_residuals(model, domain, physics, nx=200, nr=80, device="cpu"):
+    x_lin = torch.linspace(domain["x_min"], domain["x_max"], nx, device=device, dtype=torch.float64)
+    r_lin = torch.linspace(domain["r_min"], domain["r_max"], nr, device=device, dtype=torch.float64)
+    XX, RR = torch.meshgrid(x_lin, r_lin, indexing="ij")
+
+    x_flat = XX.reshape(-1).clone().detach().requires_grad_(True)
+    r_flat = RR.reshape(-1).clone().detach().requires_grad_(True)
+
+    # The grid and unweighted reductions are intentionally validation-specific;
+    # all physics terms and signs come from the same function used by training.
+    equation = compute_equation_residuals(model, x_flat, r_flat, physics)
+    _, ni, _, _, _, _, Vex, _, _, _, _ = equation["fields"]
+    res_ion_raw = equation["ion_cont_raw"]
+    res_ion = equation["ion_cont"]
+    res_neut = equation["neut_cont"]
+    res_poisson = equation["poisson"]
+    res_elec = equation["elec_cont"]
+    res_energy = equation["energy"]
+    res_ion_mom_x = equation["ion_mom_x"]
+    res_ion_mom_r = equation["ion_mom_r"]
+    res_emom_x = equation["elec_mom_x"]
+    res_emom_r = equation["elec_mom_r"]
+    res_emom_t = equation["elec_mom_theta"]
+    omega_ce_hat_v = equation["omega_ce_hat"]
+    ion_electric_x = equation["ion_electric_x"]
+    nu_in_hat = equation["nu_in_hat"]
+    ion_neutral_friction_x = equation["ion_neutral_friction_x"]
+    ionization_momentum_x = equation["ionization_momentum_x"]
+    electron_drag_residual_x = equation["electron_drag_residual_x"]
+
+    ion_raw_mse = float(res_ion_raw.pow(2).mean().item())
+    ion_mse     = float(res_ion.pow(2).mean().item())
+    neut_mse    = float(res_neut.pow(2).mean().item())
+    pois_mse    = float(res_poisson.pow(2).mean().item())
+    elec_mse    = float(res_elec.pow(2).mean().item())
+    energy_mse  = float(res_energy.pow(2).mean().item())
+    imom_x_mse  = float(res_ion_mom_x.pow(2).mean().item())
+    imom_r_mse  = float(res_ion_mom_r.pow(2).mean().item())
+    emom_x_mse  = float(res_emom_x.pow(2).mean().item())
+    emom_r_mse  = float(res_emom_r.pow(2).mean().item())
+    emom_t_mse  = float(res_emom_t.pow(2).mean().item())
+
+    return {
+        "IonCont_MSE":  ion_raw_mse,
+        "IonCont_scaled_MSE": ion_mse,
+        "NeutCont_MSE": neut_mse,
+        "Poisson_MSE":  pois_mse,
+        "ElecCont_MSE": elec_mse,
+        "IonCont_RMS":  ion_raw_mse ** 0.5,
+        "IonCont_scaled_RMS": ion_mse ** 0.5,
+        "NeutCont_RMS": neut_mse ** 0.5,
+        "Poisson_RMS":  pois_mse ** 0.5,
+        "ElecCont_RMS": elec_mse ** 0.5,
+        "Energy_MSE":       energy_mse,
+        "Energy_RMS":       energy_mse ** 0.5,
+        "ion_mom_x_RMS":    imom_x_mse ** 0.5,
+        "ion_mom_r_RMS":    imom_r_mse ** 0.5,
+        "ElecMomX_RMS":     emom_x_mse ** 0.5,
+        "ElecMomR_RMS":     emom_r_mse ** 0.5,
+        "ElecMomTheta_RMS": emom_t_mse ** 0.5,
+        "omega_ce_hat_max": float(omega_ce_hat_v.detach().max().item()),
+        "Vex_max":  float(Vex.detach().max().item()),
+        "Vex_min":  float(Vex.detach().min().item()),
+        "Vex_mean": float(Vex.detach().mean().item()),
+        "ion_electric_x_abs_mean": float(ion_electric_x.detach().abs().mean().item()),
+        "nu_in_hat": float(nu_in_hat.detach().mean().item()),
+        "ion_friction_x_abs_mean": float(
+            (ion_neutral_friction_x + ionization_momentum_x + electron_drag_residual_x).detach().abs().mean().item()
+        ),
+        "ion_neutral_friction_x_mean": float(ion_neutral_friction_x.detach().mean().item()),
+        "ionization_momentum_x_mean": float(ionization_momentum_x.detach().mean().item()),
+        "electron_drag_x_mean": float(electron_drag_residual_x.detach().mean().item()),
+        "ion_friction_over_electric_x": float(
+            (
+                (ion_neutral_friction_x + ionization_momentum_x + electron_drag_residual_x).detach().abs().mean()
+                / torch.clamp(ion_electric_x.detach().abs().mean(), min=1e-30)
+            ).item()
+        ),
+    }
+
+
+# =========================================================
+# SciPy quasi-Newton optimizer bridge
+# =========================================================
+
+class SciPyStageRejected(RuntimeError):
+    """Raised when a deterministic optimizer stage trips a safety guard."""
+
+
+def get_flat_params(model):
+    vec = torch.nn.utils.parameters_to_vector(model.parameters())
+    return vec.detach().cpu().numpy().astype(np.float64, copy=True)
+
+
+def set_flat_params(model, flat_params):
+    params = list(model.parameters())
+    if not params:
+        return
+    ref = params[0]
+    vec = torch.as_tensor(flat_params, dtype=ref.dtype, device=ref.device)
+    torch.nn.utils.vector_to_parameters(vec, params)
+
+
+def scipy_loss_and_grad(flat_params, model, x, r, boundary_data, domain, physics, weights):
+    with torch.no_grad():
+        set_flat_params(model, flat_params)
+
+    model.eval()
+    model.zero_grad(set_to_none=True)
+
+    with torch.enable_grad():
+        total, _ = compute_all_losses(model, x, r, boundary_data, domain, physics, weights)
+        total.backward()
+
+    grads = []
+    for p in model.parameters():
+        if p.grad is None:
+            grads.append(torch.zeros_like(p).reshape(-1))
+        else:
+            grads.append(p.grad.detach().reshape(-1))
+    grad_vec = torch.cat(grads).cpu().numpy().astype(np.float64, copy=True)
+    return float(total.detach().cpu().item()), grad_vec
+
+
+def _physical_diagnostics(model, domain, physics, nx=200, nr=80, device="cpu"):
+    x_grid = torch.linspace(domain["x_min"], domain["x_max"], nx, device=device, dtype=torch.float64)
+    r_grid = torch.linspace(domain["r_min"], domain["r_max"], nr, device=device, dtype=torch.float64)
+    XX, RR = torch.meshgrid(x_grid, r_grid, indexing="ij")
+    x_flat = XX.reshape(-1).clone().detach().requires_grad_(True)
+    r_flat = RR.reshape(-1).clone().detach().requires_grad_(True)
+
+    phi, ni, _, _, _, _, _, _, _, _, eta = model(x_flat, r_flat)
+    phi_x = _grad(phi, x_flat)
+    Ex = -phi_x
+
+    ni_np = ni.detach().reshape(nx, nr).cpu().numpy()
+    Ex_np = Ex.detach().reshape(nx, nr).cpu().numpy()
+    eta_np = eta.detach().reshape(nx, nr).cpu().numpy()
+    x_np = x_grid.detach().cpu().numpy()
+
+    ni_peak_idx = np.unravel_index(int(np.argmax(ni_np)), ni_np.shape)
+    Ex_peak_idx = np.unravel_index(int(np.argmax(np.abs(Ex_np))), Ex_np.shape)
+
+    x_in = torch.full((nr,), domain["x_min"], device=device, dtype=torch.float64)
+    r_in = torch.linspace(domain["r_min"], domain["r_max"], nr, device=device, dtype=torch.float64)
+    with torch.no_grad():
+        _, ni_in, _, _, _, _, _, _, _, _, _ = model(x_in, r_in)
+
+    eta_max = float(model.eta_max)
+    eta_sat_frac = float(np.mean(np.abs(eta_np) > 0.95 * eta_max))
+
+    return {
+        "ni_peak_x": float(x_np[ni_peak_idx[0]]),
+        "ni_peak_value": float(ni_np[ni_peak_idx]),
+        "Ex_peak_x": float(x_np[Ex_peak_idx[0]]),
+        "eta_saturation_fraction": eta_sat_frac,
+        "eta_abs_max": float(np.max(np.abs(eta_np))),
+        "ni_inlet_value": float(ni_in.detach().mean().cpu().item()),
+    }
+
+
+def _stage_safety_triggers(initial_loss, final_loss, residuals, diagnostics):
+    triggers = []
+    if diagnostics["eta_saturation_fraction"] > 0.10:
+        triggers.append("eta saturation fraction > 0.10")
+    if diagnostics["ni_peak_x"] < 0.3:
+        triggers.append("ni peak returned to inlet (x < 0.3)")
+    if diagnostics["ni_peak_value"] < 0.04:
+        triggers.append("ni peak amplitude below 0.04")
+    if residuals["Poisson_RMS"] > 0.03:
+        triggers.append("Poisson RMS > 0.03")
+    if final_loss > 10.0 * initial_loss:
+        triggers.append("loss increased > 10x")
+    return triggers
+
+
+def run_scipy_bfgs_stage(
+    model, checkpoint_path, output_dir,
+    x, r, boundary_data, domain, physics, weights,
+    maxiter=50, gtol=1e-5, maxls=5,
+    run_name="pinn_het_2d_v26_scipy_bfgs_stabilize",
+    bfgs_memory_limit_gb=8.0,
+):
+    from scipy.optimize import minimize
+
+    create_output_folders(output_dir)
+    device = next(model.parameters()).device
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state = checkpoint["model_state_dict"] if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint else checkpoint
+    model.load_state_dict(state)
+    model.train()
+
+    initial_flat = get_flat_params(model)
+    n_params = initial_flat.size
+    dense_bfgs_gb = (n_params * n_params * 8) / (1024 ** 3)
+
+    history = _init_history()
+    eval_counter = {"n": 0}
+    iter_counter = {"n": 0}
+
+    initial_loss, initial_grad = scipy_loss_and_grad(
+        initial_flat, model, x, r, boundary_data, domain, physics, weights
+    )
+
+    def record_loss(loss_value):
+        _, loss_dict = compute_all_losses(model, x, r, boundary_data, domain, physics, weights)
+        for k in history:
+            history[k].append(loss_dict.get(k, history[k][-1] if history[k] else 0.0))
+        history["total"][-1] = float(loss_value)
+
+    record_loss(initial_loss)
+    best_loss = initial_loss
+
+    if dense_bfgs_gb > bfgs_memory_limit_gb:
+        message = (
+            f"Rejected before SciPy BFGS: {n_params} parameters require about "
+            f"{dense_bfgs_gb:.2f} GB for the dense inverse Hessian."
+        )
+        final_loss = initial_loss
+        residuals = compute_validation_residuals(model, domain, physics, device=device)
+        diagnostics = _physical_diagnostics(model, domain, physics, device=device)
+        triggers = [message] + _stage_safety_triggers(initial_loss, final_loss, residuals, diagnostics)
+        result = {
+            "accepted": False,
+            "stop_reason": "; ".join(triggers),
+            "initial_loss": initial_loss,
+            "final_loss": final_loss,
+            "initial_grad_norm": float(np.linalg.norm(initial_grad)),
+            "final_grad_norm": float(np.linalg.norm(initial_grad)),
+            "n_params": int(n_params),
+            "dense_bfgs_memory_gb": dense_bfgs_gb,
+            "optimizer_message": "not started; dense BFGS memory guard",
+            "safety_triggers": triggers,
+            "residuals": residuals,
+            "diagnostics": diagnostics,
+        }
+    else:
+        def objective(flat_params):
+            nonlocal best_loss
+            loss_value, grad = scipy_loss_and_grad(
+                flat_params, model, x, r, boundary_data, domain, physics, weights
+            )
+            eval_counter["n"] += 1
+            if loss_value > 10.0 * initial_loss:
+                raise SciPyStageRejected("loss increased > 10x during BFGS")
+            best_loss = min(best_loss, loss_value)
+            return loss_value, grad
+
+        def callback(flat_params):
+            iter_counter["n"] += 1
+            loss_value, _ = scipy_loss_and_grad(
+                flat_params, model, x, r, boundary_data, domain, physics, weights
+            )
+            record_loss(loss_value)
+            if iter_counter["n"] % 10 == 0 or iter_counter["n"] == 1:
+                print(f"BFGS iter {iter_counter['n']:3d} | loss={loss_value:.6e}")
+
+        try:
+            opt_result = minimize(
+                objective,
+                initial_flat,
+                method="BFGS",
+                jac=True,
+                callback=callback,
+                options={"maxiter": maxiter, "gtol": gtol, "maxls": maxls, "disp": True},
+            )
+            final_flat = opt_result.x
+            optimizer_message = str(opt_result.message)
+        except SciPyStageRejected as exc:
+            final_flat = get_flat_params(model)
+            optimizer_message = str(exc)
+
+        with torch.no_grad():
+            set_flat_params(model, final_flat)
+
+        final_loss, final_grad = scipy_loss_and_grad(
+            final_flat, model, x, r, boundary_data, domain, physics, weights
+        )
+        residuals = compute_validation_residuals(model, domain, physics, device=device)
+        diagnostics = _physical_diagnostics(model, domain, physics, device=device)
+        triggers = _stage_safety_triggers(initial_loss, final_loss, residuals, diagnostics)
+        result = {
+            "accepted": len(triggers) == 0,
+            "stop_reason": "accepted" if len(triggers) == 0 else "; ".join(triggers),
+            "initial_loss": initial_loss,
+            "final_loss": final_loss,
+            "initial_grad_norm": float(np.linalg.norm(initial_grad)),
+            "final_grad_norm": float(np.linalg.norm(final_grad)),
+            "n_params": int(n_params),
+            "dense_bfgs_memory_gb": dense_bfgs_gb,
+            "optimizer_message": optimizer_message,
+            "safety_triggers": triggers,
+            "residuals": residuals,
+            "diagnostics": diagnostics,
+        }
+
+    ckpt_name = f"{run_name}_checkpoint.pt" if result["accepted"] else f"{run_name}_rejected_checkpoint.pt"
+    ckpt_path = os.path.join(output_dir, ckpt_name)
+    physics_out = dict(physics)
+    physics_out["Id_mean_A"] = mean_current_A(model, domain, physics)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "physics": physics_out,
+            "domain": domain,
+            "eta_max": float(model.eta_max),
+            "run_name": run_name,
+            "scipy_bfgs_result": result,
+        },
+        ckpt_path,
+    )
+    result["checkpoint_path"] = ckpt_path
+
+    metrics_path = os.path.join(output_dir, f"{run_name}_bfgs_metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(result, f, indent=2)
+    result["metrics_path"] = metrics_path
+
+    save_loss_plot(history, output_dir, run_name, physics_out)
+    return result
+
+
+def evaluate_on_grid(model, domain, physics, nx=200, nr=200, device="cpu"):
+    x_lin = torch.linspace(domain["x_min"], domain["x_max"], nx, device=device, dtype=torch.float64)
+    r_lin = torch.linspace(domain["r_min"], domain["r_max"], nr, device=device, dtype=torch.float64)
+    XX, RR = torch.meshgrid(x_lin, r_lin, indexing="ij")
+
+    x_flat = XX.reshape(-1).clone().detach().requires_grad_(True)
+    r_flat = RR.reshape(-1).clone().detach().requires_grad_(True)
+
+    phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, eta = model(x_flat, r_flat)
+
+    ki = compute_ki(Te, physics)
+    Si = compute_Si(nn_, ne, Te, physics)
+    Jx = ni * Vix - ne * Vex
+
+    phi_x = _grad(phi, x_flat)
+    phi_r = _grad(phi, r_flat)
+    Ex = -phi_x
+    Er = -phi_r
+
+    def to_np(t):
+        return t.reshape(nx, nr).detach().cpu().numpy()
+
+    return (
+        XX.cpu().numpy(),
+        RR.cpu().numpy(),
+        to_np(phi),
+        to_np(ni),
+        to_np(Vix),
+        to_np(Vir),
+        to_np(nn_),
+        to_np(ne),
+        to_np(Vex),
+        to_np(Ver),
+        to_np(Te),
+        to_np(Vetheta),
+        to_np(Si),
+        to_np(Jx),
+        to_np(ki),
+        to_np(Ex),
+        to_np(Er),
+        to_np(eta),
+    )
+
+
+# =========================================================
+# Plots
+# =========================================================
+
+def save_combined_plot(
+    XX, RR, phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, Si, Jx, ki, Ex, Er, eta,
+    output_dir, run_name, physics,
+):
+    plt.rcParams.update({"font.size": 13})
+
+    fields = [
+        (phi,     r"Potential $\hat{\phi}(x,r)$"),
+        (ni,      r"Ion density $\hat{n}_i(x,r)$"),
+        (nn_,     r"Neutral density $\hat{n}_n(x,r)$"),
+        (ne,      r"Electron density $\hat{n}_e(x,r)$"),
+        (Te,      r"Electron temperature $\hat{T}_e(x,r)$"),
+        (Vix,     r"Ion axial velocity $\hat{V}_{ix}(x,r)$"),
+        (Vir,     r"Ion radial velocity $\hat{V}_{ir}(x,r)$"),
+        (Vex,     r"Electron axial velocity $\hat{V}_{ex}(x,r)$"),
+        (Ver,     r"Electron radial velocity $\hat{V}_{er}(x,r)$"),
+        (Vetheta, r"Hall drift $\hat{V}_{e\theta}(x,r)$"),
+        (Si,      r"Ionization source $\hat{S}_i(x,r)$"),
+        (ki,      r"Ionization rate $\hat{k}_i(\hat{T}_e)$"),
+        (Ex,      r"Electric field $\hat{E}_x(x,r)$"),
+        (Er,      r"Electric field $\hat{E}_r(x,r)$"),
+        (eta,     r"Deviation $\eta(x,r)$"),
+    ]
+
+    fig, axes = plt.subplots(4, 4, figsize=(24, 18))
+    axes = axes.flatten()
+
+    JT_label = physics.get("Id_mean_A", physics["JT_norm"])
+    label = (
+        f"alpha={physics['alpha']:.2e}, "
+        f"JT*={JT_label:.3f}, "
+        f"Vn={physics['Vn']:.3f}, "
+        f"delta={physics['delta']}, "
+        f"B_max={physics['B_max']}"
+    )
+
+    for i, ax in enumerate(axes):
+        if i < len(fields):
+            data, title = fields[i]
+            im = ax.pcolormesh(XX, RR, data, shading="auto", cmap="viridis")
+            ax.set_title(title, fontsize=13)
+            ax.set_xlabel("x̂", fontsize=11)
+            ax.set_ylabel("r̂", fontsize=11)
+            ax.tick_params(labelsize=10)
+            ax.set_aspect("equal")
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        else:
+            ax.axis("off")
+
+    fig.suptitle(f"PINN HET — {label}", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+
+    path = os.path.join(output_dir, "Big_Plots", f"{run_name}_combined.png")
+    plt.savefig(path, dpi=170, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {path}")
+
+
+def save_individual_plots(
+    XX, RR, phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, Si, Jx, ki, Ex, Er, eta,
+    output_dir, run_name,
+):
+    plt.rcParams.update({"font.size": 13})
+
+    fields = {
+        "phi":      (phi,     r"$\hat{\phi}(x,r)$"),
+        "ni":       (ni,      r"$\hat{n}_i(x,r)$"),
+        "nn":       (nn_,     r"$\hat{n}_n(x,r)$"),
+        "ne":       (ne,      r"$\hat{n}_e(x,r)$"),
+        "Te":       (Te,      r"$\hat{T}_e(x,r)$"),
+        "Vix":      (Vix,     r"$\hat{V}_{ix}(x,r)$"),
+        "Vir":      (Vir,     r"$\hat{V}_{ir}(x,r)$"),
+        "Vex":      (Vex,     r"$\hat{V}_{ex}(x,r)$"),
+        "Ver":      (Ver,     r"$\hat{V}_{er}(x,r)$"),
+        "Vetheta":  (Vetheta, r"$\hat{V}_{e\theta}(x,r)$"),
+        "Si":       (Si,      r"$\hat{S}_i(x,r)$"),
+        "ki":       (ki,      r"$\hat{k}_i(\hat{T}_e)$"),
+        "Ex":       (Ex,      r"$\hat{E}_x(x,r)$"),
+        "Er":       (Er,      r"$\hat{E}_r(x,r)$"),
+        "eta":      (eta,     r"$\eta(x,r)$ (deviation)"),
+    }
+
+    for name, (data, title) in fields.items():
+        fig, ax = plt.subplots(figsize=(6, 5))
+        im = ax.pcolormesh(XX, RR, data, shading="auto", cmap="viridis")
+        ax.set_title(title, fontsize=14)
+        ax.set_xlabel("x̂", fontsize=12)
+        ax.set_ylabel("r̂", fontsize=12)
+        ax.tick_params(labelsize=11)
+        ax.set_aspect("equal")
+        fig.colorbar(im, ax=ax)
+
+        path = os.path.join(output_dir, "Individual_Plots", f"{run_name}_{name}.png")
+        plt.savefig(path, dpi=140, bbox_inches="tight")
+        plt.close()
+
+
+def save_loss_plot(history, output_dir, run_name, physics):
+    fig, axes = plt.subplots(1, 3, figsize=(17, 4))
+
+    axes[0].semilogy(history["total"], color="black", lw=2)
+    axes[0].set_title("Total loss")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Loss")
+    axes[0].grid(True, which="both", alpha=0.3)
+
+    axes[1].semilogy(history["poisson"],   label="poisson")
+    axes[1].semilogy(history["ion_cont"],  label="ion_cont")
+    axes[1].semilogy(history["neut_cont"], label="neut_cont")
+    axes[1].semilogy(history["elec_cont"], label="elec_cont")
+    axes[1].semilogy(history["integrated_current"], label="integrated_current")
+    axes[1].set_title("Main losses")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Loss")
+    axes[1].legend(fontsize=7)
+    axes[1].grid(True, which="both", alpha=0.3)
+
+    axes[2].plot(history["Id_mean_A"], label="Mean integrated current [A]")
+    axes[2].axhline(
+        y=physics["JT_target_A"], color="red", linestyle="--", alpha=0.6, label="5.4 A target"
+    )
+    axes[2].set_title("Mean integrated current")
+    axes[2].set_xlabel("Epoch")
+    axes[2].set_ylabel("A")
+    axes[2].legend(fontsize=7)
+    axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, "Loss_Plots", f"{run_name}_Loss_summary.png")
+    plt.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {path}")
+
+
+def save_residual_maps(model, domain, physics, output_dir, run_name, nx=150, nr=60, device="cpu"):
+    import matplotlib.colors as mcolors
+
+    x_lin = torch.linspace(domain["x_min"], domain["x_max"], nx, device=device, dtype=torch.float64)
+    r_lin = torch.linspace(domain["r_min"], domain["r_max"], nr, device=device, dtype=torch.float64)
+    XX, RR = torch.meshgrid(x_lin, r_lin, indexing="ij")
+
+    x_flat = XX.reshape(-1).clone().detach().requires_grad_(True)
+    r_flat = RR.reshape(-1).clone().detach().requires_grad_(True)
+
+    phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, eta = model(x_flat, r_flat)
+    ki = compute_ki(Te, physics)
+    Si = compute_Si(nn_, ne, Te, physics)
+
+    niVix_x = _grad(ni * Vix, x_flat)
+    niVir_r = _grad(ni * Vir, r_flat)
+    res_ion = niVix_x + niVir_r + ni * Vir / r_flat - Si
+    res_ion_np = res_ion.detach().reshape(nx, nr).cpu().numpy()
+
+    nn_x = _grad(nn_, x_flat)
+    res_neut = physics["Vn"] * nn_x + Si
+    res_neut_np = res_neut.detach().reshape(nx, nr).cpu().numpy()
+
+    phi_x  = _grad(phi, x_flat)
+    phi_r  = _grad(phi, r_flat)
+    phi_xx = _grad(phi_x, x_flat)
+    phi_rr = _grad(phi_r, r_flat)
+    laplace_phi = phi_xx + phi_rr + phi_r / r_flat
+    res_pois = (laplace_phi / physics["alpha"] - ni * eta) / model.eta_max
+    res_pois_np = res_pois.detach().reshape(nx, nr).cpu().numpy()
+
+    XX_np = XX.cpu().numpy()
+    RR_np = RR.cpu().numpy()
+    ni_np = ni.detach().reshape(nx, nr).cpu().numpy()
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 9))
+
+    def plot_residual(ax, data, title, cmap="RdBu_r"):
+        vmax = max(abs(data.max()), abs(data.min())) * 0.8
+        if vmax > 0:
+            norm = mcolors.TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
+            im = ax.pcolormesh(XX_np, RR_np, data, shading="auto", cmap=cmap, norm=norm)
+        else:
+            im = ax.pcolormesh(XX_np, RR_np, data, shading="auto", cmap=cmap)
+        ax.set_title(title, fontsize=13)
+        ax.set_xlabel("x̂"); ax.set_ylabel("r̂"); ax.set_aspect("equal")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    plot_residual(axes[0, 0], res_ion_np,  r"IonCont: $\nabla\cdot(n_iV_i)-S_i$")
+    plot_residual(axes[0, 1], res_neut_np, r"NeutCont: $\partial_x(V_n n_n)+S_i$")
+    plot_residual(axes[0, 2], res_pois_np, r"Poisson: $[(\nabla^2\phi)/\alpha - n_i\eta]/\eta_{max}$")
+
+    im = axes[1, 0].pcolormesh(XX_np, RR_np, ni_np, shading="auto", cmap="viridis")
+    axes[1, 0].set_title("ni (reference)"); axes[1, 0].set_aspect("equal")
+    fig.colorbar(im, ax=axes[1, 0], fraction=0.046, pad=0.04)
+
+    r_mid_idx = nr // 2
+    x_1d = XX_np[:, r_mid_idx]
+    axes[1, 1].plot(x_1d, np.abs(res_ion_np[:, r_mid_idx]),  'b-', lw=2, label='|IonCont|')
+    axes[1, 1].plot(x_1d, np.abs(res_neut_np[:, r_mid_idx]), 'r-', lw=2, label='|NeutCont|')
+    axes[1, 1].plot(x_1d, np.abs(res_pois_np[:, r_mid_idx]), 'g-', lw=2, label='|Poisson|')
+    ion_rms  = float(np.sqrt(np.mean(res_ion_np**2)))
+    neut_rms = float(np.sqrt(np.mean(res_neut_np**2)))
+    pois_rms = float(np.sqrt(np.mean(res_pois_np**2)))
+    axes[1, 1].set_title(f"Centerline residuals\nIon={ion_rms:.4f}, Neut={neut_rms:.4f}, Pois={pois_rms:.4f}")
+    axes[1, 1].set_xlabel("x̂"); axes[1, 1].legend(); axes[1, 1].grid(alpha=0.3)
+
+    axes[1, 2].axis("off")
+
+    fig.suptitle(f"PDE residual maps — {run_name}", fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    path = os.path.join(output_dir, "Big_Plots", f"{run_name}_residuals.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {path}")
+
+
+def save_centerline_profiles(model, domain, physics, output_dir, run_name,
+                              nx=200, device="cpu"):
+    L_canal = physics["L_canal"]
+    phi_ref = physics["phi_ref"]
+    V_ref   = physics["V_ref"]
+    n_ref   = physics["n_ref"]
+
+    r_center = 0.5 * (domain["r_min"] + domain["r_max"])
+    x_lin = torch.linspace(domain["x_min"], domain["x_max"], nx,
+                           device=device, dtype=torch.float64)
+    r_line = torch.full_like(x_lin, r_center)
+    x_req = x_lin.clone().requires_grad_(True)
+    r_req = r_line.clone().requires_grad_(True)
+
+    phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, eta = model(x_req, r_req)
+    ki = compute_ki(Te, physics)
+    Si = compute_Si(nn_, ne, Te, physics)
+
+    x_mm = x_lin.cpu().numpy() * L_canal * 1e3
+
+    def n(t): return t.detach().cpu().numpy()
+
+    fig, axes = plt.subplots(2, 4, figsize=(20, 8))
+    axes = axes.flatten()
+
+    plots = [
+        (x_mm, n(phi) * phi_ref,      r"$\phi$ [V]",          "Electric potential"),
+        (x_mm, n(ni)  * n_ref * 1e-18, r"$n_i$ [×10¹⁸ m⁻³]",   "Ion density"),
+        (x_mm, n(nn_) * n_ref * 1e-18, r"$n_n$ [×10¹⁸ m⁻³]",   "Neutral density"),
+        (x_mm, n(Te)  * phi_ref,       r"$T_e$ [eV]",          "Electron temperature"),
+        (x_mm, n(Vix) * V_ref * 1e-3,  r"$V_{ix}$ [km/s]",     "Ion axial velocity"),
+        (x_mm, n(Si)  * n_ref * V_ref / L_canal * 1e-24,
+                                        r"$S_i$ [×10²⁴ m⁻³s⁻¹]", "Ionization source"),
+        (x_mm, n(eta), r"$\eta$", "Charge separation"),
+        (x_mm, n(ne)  * n_ref * 1e-18, r"$n_e$ [×10¹⁸ m⁻³]",   "Electron density"),
+    ]
+
+    for ax, (x_data, y_data, ylabel, title) in zip(axes, plots):
+        ax.plot(x_data, y_data, 'b-', lw=2)
+        ax.set_xlabel("x [mm]"); ax.set_ylabel(ylabel); ax.set_title(title)
+        ax.grid(alpha=0.3)
+        ax.axvline(x=physics["x0_Te"] * L_canal * 1e3, color='r', ls='--', alpha=0.5, label='Te peak')
+        ax.legend(fontsize=8)
+
+    fig.suptitle(f"Centerline profiles — {run_name}", fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    path = os.path.join(output_dir, "Big_Plots", f"{run_name}_centerline.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {path}")
+
+
+def save_radial_profiles(model, domain, physics, output_dir, run_name,
+                         x_stations=None, nr=80, device="cpu"):
+    if x_stations is None:
+        x_stations = [
+            (0.0, "Inlet (x̂=0.0)"),
+            (physics["x0_Te"], f"Ionization zone (x̂={physics['x0_Te']:.2f})"),
+            (1.0, "Exit (x̂=1.0)"),
+        ]
+
+    L_canal = physics["L_canal"]
+    n_ref   = physics["n_ref"]
+    V_ref   = physics["V_ref"]
+    phi_ref = physics["phi_ref"]
+
+    r_lin = torch.linspace(domain["r_min"], domain["r_max"], nr,
+                           device=device, dtype=torch.float64)
+    r_phys_mm = r_lin.cpu().numpy() * L_canal * 1e3
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    colors = ["royalblue", "darkorange", "forestgreen"]
+
+    for col_idx, (x_hat, label) in enumerate(x_stations):
+        x_line = torch.full_like(r_lin, x_hat)
+        with torch.no_grad():
+            phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, eta = model(x_line, r_lin)
+
+        c = colors[col_idx]
+        axes[0, 0].plot(r_phys_mm, ni.cpu().numpy()  * n_ref * 1e-18, color=c, lw=2, label=label)
+        axes[0, 1].plot(r_phys_mm, nn_.cpu().numpy() * n_ref * 1e-18, color=c, lw=2, label=label)
+        axes[0, 2].plot(r_phys_mm, phi.cpu().numpy() * phi_ref,       color=c, lw=2, label=label)
+        axes[1, 0].plot(r_phys_mm, Te.cpu().numpy()  * phi_ref,       color=c, lw=2, label=label)
+        axes[1, 1].plot(r_phys_mm, Vix.cpu().numpy() * V_ref * 1e-3,  color=c, lw=2, label=label)
+        axes[1, 2].plot(r_phys_mm, eta.cpu().numpy(),                  color=c, lw=2, label=label)
+
+    titles = [
+        ("Ion density",  r"$n_i$ [×10¹⁸ m⁻³]"),
+        ("Neutral density", r"$n_n$ [×10¹⁸ m⁻³]"),
+        ("Electric potential", r"$\phi$ [V]"),
+        ("Electron temperature", r"$T_e$ [eV]"),
+        ("Ion axial velocity", r"$V_{ix}$ [km/s]"),
+        ("Deviation", r"$\eta$"),
+    ]
+    for ax, (title, ylabel) in zip(axes.flatten(), titles):
+        ax.set_xlabel("r [mm]"); ax.set_ylabel(ylabel); ax.set_title(title)
+        ax.legend(fontsize=9); ax.grid(alpha=0.3)
+
+    fig.suptitle(f"Radial profiles at key axial stations — {run_name}", fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    path = os.path.join(output_dir, "Big_Plots", f"{run_name}_radial_profiles.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {path}")
+
+
+def save_global_metrics(model, domain, physics, output_dir, run_name,
+                        nr=200, device="cpu"):
+    L_canal = physics["L_canal"]
+    n_ref   = physics["n_ref"]
+    V_ref   = physics["V_ref"]
+    mi      = 2.180e-25
+    e_phys  = 1.602e-19
+    Vn_norm = physics["Vn"]
+
+    r_lin = torch.linspace(domain["r_min"], domain["r_max"], nr,
+                           device=device, dtype=torch.float64)
+    r_phys = r_lin.cpu().numpy() * L_canal
+    dr_phys = r_phys[1] - r_phys[0]
+
+    x_exit = torch.ones(nr, device=device, dtype=torch.float64)
+    with torch.no_grad():
+        _, ni_e, Vix_e, _, nn_e, _, Vex_e, _, _, _, _ = model(x_exit, r_lin)
+    ni_e  = ni_e.cpu().numpy();  Vix_e = Vix_e.cpu().numpy()
+    Vex_e = Vex_e.cpu().numpy(); nn_e  = nn_e.cpu().numpy()
+
+    x_in = torch.zeros(nr, device=device, dtype=torch.float64)
+    with torch.no_grad():
+        _, _, _, _, nn_in, _, _, _, _, _, _ = model(x_in, r_lin)
+    nn_in = nn_in.cpu().numpy()
+
+    T_hat = float(np.trapz(ni_e * Vix_e**2 * r_phys, dx=dr_phys))
+    T_N   = 2.0 * np.pi * mi * n_ref * V_ref**2 * T_hat
+    T_mN  = T_N * 1e3
+
+    mdot_hat  = float(np.trapz(nn_in * r_phys, dx=dr_phys))
+    mdot_kg_s = 2.0 * np.pi * mi * n_ref * V_ref * Vn_norm * mdot_hat
+    mdot_mg_s = mdot_kg_s * 1e6
+
+    Id_hat = float(np.trapz(ni_e * (Vix_e - Vex_e) * r_phys, dx=dr_phys))
+    Id_A   = 2.0 * np.pi * e_phys * n_ref * V_ref * Id_hat
+
+    nn_exit_flux  = float(np.trapz(nn_e  * r_phys, dx=dr_phys))
+    nn_inlet_flux = float(np.trapz(nn_in * r_phys, dx=dr_phys))
+    eta_i = 1.0 - nn_exit_flux / nn_inlet_flux if nn_inlet_flux > 0 else 0.0
+
+    Vix_exit_phys = float(np.mean(Vix_e)) * V_ref
+    Vcls = float(np.sqrt(2.0 * e_phys * 300.0 / mi))
+
+    mdot_P5_kg = 10.46e-6
+    T_beam_N   = (mi / e_phys) * Id_A * Vix_exit_phys * eta_i
+    g0 = 9.81
+    Isp_beam_s = T_beam_N / (mdot_P5_kg * g0)
+
+    metrics = {
+        "Discharge current [A]":     Id_A,
+        "Ionization efficiency [—]": eta_i,
+        "Mean Vix(exit) [km/s]":     Vix_exit_phys * 1e-3,
+        "Vix(exit)/V_classical [—]": Vix_exit_phys / Vcls,
+        "Beam Isp estimate [s]":     Isp_beam_s,
+        "JT_norm (target)":          physics["JT_norm"],
+        "Id_mean_A":                physics.get("Id_mean_A", float("nan")),
+    }
+
+    P5_ref = {
+        "Discharge current [A]":     5.4,
+        "Ionization efficiency [—]": 0.90,
+        "Beam Isp estimate [s]":     1640.0,
+    }
+
+    lines = [
+        f"{'='*72}",
+        f"  Performance Metrics — {run_name}",
+        f"{'='*72}",
+        f"  {'Quantity':<40} {'PINN':>10} {'P5 ref':>14}",
+        f"  {'-'*67}",
+    ]
+    for key, val in metrics.items():
+        ref = P5_ref.get(key)
+        ref_str = f"{ref:>14.2f}" if ref is not None else f"{'—':>14}"
+        lines.append(f"  {key:<40} {val:>10.3f} {ref_str}")
+    lines.append(f"{'='*72}")
+    report = "\n".join(lines)
+    print(report)
+
+    txt_path = os.path.join(output_dir, f"{run_name}_metrics.txt")
+    with open(txt_path, "w") as f:
+        f.write(report + "\n")
+    print(f"Saved: {txt_path}")
+    return metrics
+
+
+# =========================================================
+# Hybrid data + physics loss: Haas & Gallimore AIAA-2000-3422
+# (P5 thruster at 300 V / 5.4 A)
+# =========================================================
+
+# Index into the 11-tensor PINN.forward return:
+#   (phi, ni, Vix, Vir, nn_, ne, Vex, Ver, Te, Vetheta, eta)
+DATA_OUTPUT_INDICES = {"ni": 1, "Te": 8, "Vp": 0}
+
+_DATA_LOSS_MAP_PRINTED = False
+
+
+def load_haas_gallimore_data(path, domain, physics, device, dtype=torch.float64,
+                             include_r_mm=None):
+    """Load Haas/Gallimore P5 experimental data, normalize to network units.
+
+    CSV columns: x_mm, r_mm, quantity, value, unit. x_mm is measured from the
+    anode; r_mm is measured from the inner wall. Points outside the simulation
+    domain in normalized coordinates are dropped (printed for sanity).
+
+    Normalization (mirrors the rest of the code):
+      x_n = x_mm * 1e-3 / L_canal
+      r_n = (r_in_phys + r_mm * 1e-3) / L_canal      (r_in_phys = r_min * L_canal)
+      ni  -> ni / n_ref           (m^-3 -> normalized)
+      Te  -> Te / phi_ref         (eV   -> normalized; phi_ref = Ei_eV = 12.1)
+      Vp  -> Vp / phi_ref         (V    -> normalized phi; phi_right = 0 = cathode ref)
+
+    Returns dict { 'ni': {'coords': (N,2), 'values': (N,)}, 'Te': ..., 'Vp': ... }.
+    """
+    L_canal   = physics["L_canal"]
+    n_ref     = physics["n_ref"]
+    phi_ref   = physics["phi_ref"]
+    r_in_phys = domain["r_min"] * L_canal
+
+    raw_data = np.genfromtxt(
+        path, delimiter=",", names=True,
+        dtype=[("x_mm", "f8"), ("r_mm", "f8"), ("quantity", "U8"),
+               ("value", "f8"), ("unit", "U8")],
+        encoding="utf-8",
+    )
+    if include_r_mm is None:
+        include_r_values = None
+    else:
+        include_r_values = np.atleast_1d(include_r_mm).astype(float)
+
+    buckets = {"ni": [], "Te": [], "Vp": []}
+    dropped = {"ni": 0, "Te": 0, "Vp": 0}
+    filtered = {"ni": 0, "Te": 0, "Vp": 0}
+    for row in raw_data:
+        q = str(row["quantity"])
+        if q not in buckets:
+            continue
+        if include_r_values is not None and not np.any(
+            np.isclose(float(row["r_mm"]), include_r_values, atol=1e-9)
+        ):
+            filtered[q] += 1
+            continue
+        x_n = float(row["x_mm"]) * 1.0e-3 / L_canal
+        r_n = (r_in_phys + float(row["r_mm"]) * 1.0e-3) / L_canal
+        if not (domain["x_min"] <= x_n <= domain["x_max"]
+                and domain["r_min"] <= r_n <= domain["r_max"]):
+            dropped[q] += 1
+            continue
+        v = float(row["value"])
+        if q == "ni":
+            v_n = v / n_ref
+        else:                          # Te (eV) or Vp (V); both / phi_ref
+            v_n = v / phi_ref
+        buckets[q].append((x_n, r_n, v_n))
+
+    out = {}
+    if include_r_values is None:
+        print("Haas/Gallimore P5 (300V/5.4A) — data loaded (in-domain / dropped):")
+    else:
+        r_txt = ", ".join(f"{v:g}" for v in include_r_values)
+        print(
+            "Haas/Gallimore P5 (300V/5.4A) — data loaded "
+            f"with r_mm filter [{r_txt}] (in-domain / filtered / dropped):"
+        )
+    for q, rows in buckets.items():
+        if rows:
+            arr = np.asarray(rows, dtype=np.float64)
+            coords = torch.tensor(arr[:, :2], dtype=dtype, device=device)
+            values = torch.tensor(arr[:, 2],  dtype=dtype, device=device)
+        else:
+            coords = torch.zeros((0, 2), dtype=dtype, device=device)
+            values = torch.zeros((0,),   dtype=dtype, device=device)
+        out[q] = {"coords": coords, "values": values}
+        if include_r_values is None:
+            print(f"  {q:>3s}: {len(rows):4d} kept  /  {dropped[q]:4d} outside domain")
+        else:
+            print(
+                f"  {q:>3s}: {len(rows):4d} kept  /  {filtered[q]:4d} filtered  /  "
+                f"{dropped[q]:4d} outside domain"
+            )
+    return out
+
+
+def compute_data_loss(model, exp_data, output_indices=None):
+    """Data loss against Haas/Gallimore measurements.
+
+    ni uses log-density MSE so the hybrid loss penalizes multiplicative density
+    errors and can select the measured high-density branch. Te and Vp retain
+    normalized MSE. All terms are torch scalars with grad if model params have
+    grad enabled, so the caller can add the weighted sum to the PDE total.
+    Empty buckets contribute zero.
+    """
+    global _DATA_LOSS_MAP_PRINTED
+    if output_indices is None:
+        output_indices = DATA_OUTPUT_INDICES
+    if not _DATA_LOSS_MAP_PRINTED:
+        print(f"compute_data_loss output index mapping: {output_indices}")
+        print("  PINN.forward returns "
+              "(0=phi, 1=ni, 2=Vix, 3=Vir, 4=nn, 5=ne, 6=Vex, 7=Ver, "
+              "8=Te, 9=Vetheta, 10=eta)")
+        _DATA_LOSS_MAP_PRINTED = True
+
+    device = next(model.parameters()).device
+    dtype  = next(model.parameters()).dtype
+    out = {}
+    total = torch.zeros((), device=device, dtype=dtype)
+    for q, idx in output_indices.items():
+        d = exp_data.get(q) if exp_data is not None else None
+        if d is None or d["coords"].shape[0] == 0:
+            out[q] = torch.zeros((), device=device, dtype=dtype)
+            continue
+        x = d["coords"][:, 0]
+        r = d["coords"][:, 1]
+        outs = model(x, r)
+        pred = outs[idx]
+        target = d["values"]
+        if q == "ni":
+            eps = torch.as_tensor(1e-8, dtype=dtype, device=device)
+            mse = torch.mean((torch.log(torch.clamp(pred, min=eps))
+                              - torch.log(torch.clamp(target, min=eps))) ** 2)
+        else:
+            mse = torch.mean((pred - target) ** 2)
+        out[q] = mse
+        total = total + mse
+    out["total"] = total
+    return out
+
+
+def save_data_comparison_plots(model, exp_data, domain, output_dir,
+                               output_indices=None, nx_sweep=200):
+    """For each quantity, one plot per unique r_n: PINN axial sweep + scatter.
+
+    Saved as <output_dir>/Big_Plots/data_comparison_<q>_r<r_n>.png.
+    """
+    if output_indices is None:
+        output_indices = DATA_OUTPUT_INDICES
+    if exp_data is None:
+        print("save_data_comparison_plots: exp_data is None, skipping")
+        return
+    plot_dir = os.path.join(output_dir, "Big_Plots")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    device = next(model.parameters()).device
+    dtype  = next(model.parameters()).dtype
+    x_sweep = torch.linspace(domain["x_min"], domain["x_max"], nx_sweep,
+                             device=device, dtype=dtype)
+    x_sweep_np = x_sweep.cpu().numpy()
+    was_training = model.training
+    model.eval()
+    try:
+        for q, idx in output_indices.items():
+            d = exp_data.get(q)
+            if d is None or d["coords"].shape[0] == 0:
+                continue
+            coords = d["coords"].cpu().numpy()
+            vals   = d["values"].cpu().numpy()
+            unique_r = np.unique(np.round(coords[:, 1], 6))
+            for r_n in unique_r:
+                mask = np.isclose(coords[:, 1], r_n, atol=1e-6)
+                x_exp = coords[mask, 0]
+                v_exp = vals[mask]
+                with torch.no_grad():
+                    r_const = torch.full_like(x_sweep, float(r_n))
+                    v_pred = model(x_sweep, r_const)[idx].cpu().numpy()
+                fig, ax = plt.subplots(1, 1, figsize=(7, 4))
+                ax.plot(x_sweep_np, v_pred, "b-", lw=2, label="PINN")
+                ax.scatter(x_exp, v_exp, c="r", s=30, zorder=5,
+                           label="Haas & Gallimore (2000)")
+                ax.set_xlabel(r"$\hat x$  (normalized axial)")
+                ax.set_ylabel(f"{q} (normalized)")
+                ax.set_title(f"{q} vs experiment at $\\hat r$={r_n:.4f}")
+                ax.legend(); ax.grid(alpha=0.3)
+                plt.tight_layout()
+                path = os.path.join(
+                    plot_dir, f"data_comparison_{q}_r{r_n:.4f}.png"
+                )
+                plt.savefig(path, dpi=140, bbox_inches="tight")
+                plt.close()
+                print(f"Saved: {path}")
+    finally:
+        if was_training:
+            model.train()
+
+
+def data_loss_l2_relative(model, exp_data, output_indices=None):
+    """Per-quantity L2 relative error ||pred - target|| / ||target||."""
+    if output_indices is None:
+        output_indices = DATA_OUTPUT_INDICES
+    if exp_data is None:
+        return {q: float("nan") for q in output_indices}
+    out = {}
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for q, idx in output_indices.items():
+                d = exp_data.get(q)
+                if d is None or d["coords"].shape[0] == 0:
+                    out[q] = float("nan")
+                    continue
+                x = d["coords"][:, 0]
+                r = d["coords"][:, 1]
+                pred = model(x, r)[idx]
+                target = d["values"]
+                num = torch.sqrt(torch.mean((pred - target) ** 2))
+                den = torch.sqrt(torch.mean(target ** 2)).clamp_min(1e-30)
+                out[q] = float((num / den).item())
+    finally:
+        if was_training:
+            model.train()
+    return out

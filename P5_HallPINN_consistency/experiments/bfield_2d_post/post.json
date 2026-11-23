@@ -1,0 +1,192 @@
+{
+ "split": [
+  {
+   "x_hat": 0.0,
+   "ion_A": 0.0631,
+   "electron_parallel_conventional_A": -468.0182,
+   "electron_perpendicular_Hall_conventional_A": -0.1456,
+   "Id_DD_A": -468.1006
+  },
+  {
+   "x_hat": 0.1026,
+   "ion_A": 0.5325,
+   "electron_parallel_conventional_A": 19544.6521,
+   "electron_perpendicular_Hall_conventional_A": 1.6369,
+   "Id_DD_A": 19546.8216
+  },
+  {
+   "x_hat": 0.2051,
+   "ion_A": 1.3654,
+   "electron_parallel_conventional_A": 39729.1894,
+   "electron_perpendicular_Hall_conventional_A": 3.3125,
+   "Id_DD_A": 39733.8674
+  },
+  {
+   "x_hat": 0.3333,
+   "ion_A": 2.8932,
+   "electron_parallel_conventional_A": 18321.5769,
+   "electron_perpendicular_Hall_conventional_A": 2.6926,
+   "Id_DD_A": 18327.1628
+  },
+  {
+   "x_hat": 0.5128,
+   "ion_A": 4.3368,
+   "electron_parallel_conventional_A": 11769.4052,
+   "electron_perpendicular_Hall_conventional_A": 3.7809,
+   "Id_DD_A": 11777.5228
+  },
+  {
+   "x_hat": 0.7436,
+   "ion_A": 4.6333,
+   "electron_parallel_conventional_A": 75.0412,
+   "electron_perpendicular_Hall_conventional_A": 2.4229,
+   "Id_DD_A": 82.0974
+  },
+  {
+   "x_hat": 0.8974,
+   "ion_A": 4.6917,
+   "electron_parallel_conventional_A": 3221.2033,
+   "electron_perpendicular_Hall_conventional_A": 2.5571,
+   "Id_DD_A": 3228.452
+  },
+  {
+   "x_hat": 1.0,
+   "ion_A": 4.6294,
+   "electron_parallel_conventional_A": 5473.6751,
+   "electron_perpendicular_Hall_conventional_A": 2.9352,
+   "Id_DD_A": 5481.2396
+  }
+ ],
+ "Fpar_RMS_V_m": 1212.643649139099,
+ "ion_mom_res_share_by_x": {
+  "0-0.3": 0.010591772274897467,
+  "0.3-0.5": 0.02392107015434151,
+  "0.5-0.7": 0.5394382593335951,
+  "0.7-0.9": 0.3957664377913577,
+  "0.9-1.01": 0.030282460445808294
+ },
+ "ion_mom_res_RMS": 0.22703625475012135,
+ "midradius_terms": [
+  {
+   "x_hat": 0.0,
+   "inertia": 0.0008,
+   "electric": 0.0908,
+   "e_drag": 0.0,
+   "in_friction": -0.0,
+   "ionization": -0.0,
+   "residual": 0.0916,
+   "phi_V": 274.04,
+   "Vix_kms": 0.0745
+  },
+  {
+   "x_hat": 0.1,
+   "inertia": 0.01,
+   "electric": 0.0206,
+   "e_drag": 0.0,
+   "in_friction": 0.0,
+   "ionization": -0.0057,
+   "residual": 0.0249,
+   "phi_V": 278.6842,
+   "Vix_kms": 0.4877
+  },
+  {
+   "x_hat": 0.2,
+   "inertia": 0.0341,
+   "electric": -0.0582,
+   "e_drag": 0.0,
+   "in_friction": 0.0001,
+   "ionization": -0.0097,
+   "residual": -0.0338,
+   "phi_V": 277.4379,
+   "Vix_kms": 1.0482
+  },
+  {
+   "x_hat": 0.3,
+   "inertia": 0.0722,
+   "electric": -0.0626,
+   "e_drag": 0.0,
+   "in_friction": 0.0003,
+   "ionization": -0.0102,
+   "residual": -0.0002,
+   "phi_V": 273.4494,
+   "Vix_kms": 1.7395
+  },
+  {
+   "x_hat": 0.4,
+   "inertia": 0.0765,
+   "electric": 0.0047,
+   "e_drag": 0.0,
+   "in_friction": 0.0004,
+   "ionization": -0.0073,
+   "residual": 0.0744,
+   "phi_V": 272.3823,
+   "Vix_kms": 2.3888
+  },
+  {
+   "x_hat": 0.5,
+   "inertia": 0.027,
+   "electric": -0.2252,
+   "e_drag": 0.0,
+   "in_friction": 0.0002,
+   "ionization": -0.0032,
+   "residual": -0.2012,
+   "phi_V": 268.192,
+   "Vix_kms": 2.7108
+  },
+  {
+   "x_hat": 0.6,
+   "inertia": 0.0378,
+   "electric": -0.4263,
+   "e_drag": 0.0,
+   "in_friction": 0.0001,
+   "ionization": -0.001,
+   "residual": -0.3894,
+   "phi_V": 251.6692,
+   "Vix_kms": 2.9449
+  },
+  {
+   "x_hat": 0.7,
+   "inertia": 0.0609,
+   "electric": -0.4773,
+   "e_drag": 0.0,
+   "in_friction": 0.0,
+   "ionization": -0.0002,
+   "residual": -0.4166,
+   "phi_V": 227.0605,
+   "Vix_kms": 3.5099
+  },
+  {
+   "x_hat": 0.8,
+   "inertia": 0.1282,
+   "electric": -0.4336,
+   "e_drag": 0.0,
+   "in_friction": 0.0,
+   "ionization": -0.0,
+   "residual": -0.3054,
+   "phi_V": 196.1671,
+   "Vix_kms": 4.6492
+  },
+  {
+   "x_hat": 0.9,
+   "inertia": 0.213,
+   "electric": -0.3596,
+   "e_drag": 0.0,
+   "in_friction": 0.0,
+   "ionization": -0.0,
+   "residual": -0.1466,
+   "phi_V": 159.2089,
+   "Vix_kms": 6.7196
+  },
+  {
+   "x_hat": 1.0,
+   "inertia": 0.1927,
+   "electric": -0.2927,
+   "e_drag": 0.0,
+   "in_friction": 0.0,
+   "ionization": -0.0,
+   "residual": -0.1,
+   "phi_V": 116.2,
+   "Vix_kms": 9.3955
+  }
+ ]
+}

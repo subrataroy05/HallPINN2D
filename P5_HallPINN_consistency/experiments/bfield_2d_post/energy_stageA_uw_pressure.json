@@ -1,0 +1,44 @@
+{
+ "r_frac_0.25": {
+  "phi_anode_V": 274.04,
+  "phi_max_V": 277.975618262631,
+  "x_phimax": 0.15,
+  "phi_exit_V": 116.20000000000002,
+  "Vix_exit_km_s": 15.642825760504016,
+  "KE_exit_eV": 166.4923954888277,
+  "max_available_drop_V": 161.77561826263099,
+  "dKE_eV": 166.4886142388277,
+  "electric_work_eV": 157.84,
+  "residual_work_eV": -16.052983879508304,
+  "other_physical_eV": 24.701598118335994,
+  "ion_res_rms_over_electric_rms": 0.4467210506450406
+ },
+ "r_frac_0.5": {
+  "phi_anode_V": 274.04,
+  "phi_max_V": 277.7490154607542,
+  "x_phimax": 0.14875,
+  "phi_exit_V": 116.20000000000002,
+  "Vix_exit_km_s": 15.820205288151609,
+  "KE_exit_eV": 170.28963541922192,
+  "max_available_drop_V": 161.5490154607542,
+  "dKE_eV": 170.28585416922192,
+  "electric_work_eV": 157.84,
+  "residual_work_eV": 8.184249917581147,
+  "other_physical_eV": 4.261604251640771,
+  "ion_res_rms_over_electric_rms": 0.37174108299959413
+ },
+ "r_frac_0.75": {
+  "phi_anode_V": 274.04,
+  "phi_max_V": 277.53319678244327,
+  "x_phimax": 0.14625,
+  "phi_exit_V": 116.20000000000002,
+  "Vix_exit_km_s": 15.990346668368606,
+  "KE_exit_eV": 173.97215565937677,
+  "max_available_drop_V": 161.33319678244328,
+  "dKE_eV": 173.96837440937676,
+  "electric_work_eV": 157.84,
+  "residual_work_eV": 34.581162056490314,
+  "other_physical_eV": -18.452787647113553,
+  "ion_res_rms_over_electric_rms": 0.35733660860827665
+ }
+}

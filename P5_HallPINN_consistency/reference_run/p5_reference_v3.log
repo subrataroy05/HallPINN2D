@@ -1,0 +1,217 @@
+=== p5_reference_v3: dimensionally corrected residual expressions ===
+    niVix2_x = _grad(ni * Vix * Vix, x)
+    niVixVir_x = _grad(ni * Vix * Vir, x)
+    niVixVir_r = _grad(ni * Vix * Vir, r)
+    niVir2_r = _grad(ni * Vir * Vir, r)
+    ion_electric_x = ni * phi_x
+    ion_electric_r = ni * phi_r
+    nu_in_hat = physics.get("nu_in", 1.8e6) * tau_ref
+    ion_neutral_factor = (physics["mn"] / physics["mi"]) * nu_in_hat
+    electron_drag_force_x = ni * (physics["me"] / physics["mi"]) * coll["nu_total"] * tau_ref * (Vex - Vix)
+    electron_drag_force_r = ni * (physics["me"] / physics["mi"]) * coll["nu_total"] * tau_ref * (Ver - Vir)
+    electron_drag_residual_x = -electron_drag_force_x
+    electron_drag_residual_r = -electron_drag_force_r
+    ion_neutral_friction_x = ni * ion_neutral_factor * (Vix - physics["Vn"])
+    ionization_momentum_x = -Si * physics["Vn"]
+    ion_neutral_friction_r = ni * ion_neutral_factor * Vir
+    ionization_momentum_r = torch.zeros_like(Vir)
+    res_ion_mom_x_raw = (
+        niVix2_x + niVixVir_r + ni * Vix * Vir / r
+        + ion_electric_x
+        + electron_drag_residual_x
+        + ion_neutral_friction_x
+        + ionization_momentum_x
+    )
+    res_ion_mom_r_raw = (
+        niVixVir_x + niVir2_r + ni * Vir * Vir / r
+        + ion_electric_r
+        + electron_drag_residual_r
+        + ion_neutral_friction_r
+        + ionization_momentum_r
+    )
+    ion_mom_scale = physics.get("ion_mom_scale", 1.0)
+    res_ion_mom_x = res_ion_mom_x_raw / ion_mom_scale
+    res_ion_mom_r = res_ion_mom_r_raw / ion_mom_scale
+
+    res_current = ni * Vix - ne * Vex - JT
+
+    Br = compute_Br(x, physics)
+    momentum_mass_ratio = physics["me"] / physics["mi"]
+    momentum_tau_ref = physics.get("tau_ref", physics["L_canal"] / physics["V_ref"])
+    omega_ce_hat = momentum_mass_ratio * physics["e_over_me"] * Br * momentum_tau_ref
+    nu_hat_momentum_consistent = momentum_mass_ratio * coll["nu_total"] * momentum_tau_ref
+    Vex_x = _grad(Vex, x)
+    Vex_r = _grad(Vex, r)
+    Ver_x = _grad(Ver, x)
+    Ver_r = _grad(Ver, r)
+    Vetheta_x = _grad(Vetheta, x)
+    Vetheta_r = _grad(Vetheta, r)
+    res_elec_mom_x = (
+        momentum_mass_ratio * (ne * Vex * Vex_x + ne * Ver * Vex_r)
+        - ne * phi_x
+        - omega_ce_hat * ne * Vetheta
+        + ne * nu_hat_momentum_consistent * Vex
+    )
+    res_elec_mom_r = (
+        momentum_mass_ratio * (ne * Vex * Ver_x + ne * Ver * Ver_r)
+        - ne * phi_r
+        + ne * nu_hat_momentum_consistent * Ver
+    )
+    res_elec_mom_theta = (
+        momentum_mass_ratio * (ne * Vex * Vetheta_x + ne * Ver * Vetheta_r)
+        + omega_ce_hat * ne * Vex
+        + ne * nu_hat_momentum_consistent * Vetheta
+    )
+=== p5_reference_v3: init_seed=7, reference_collocation_seed=2601, epochs=15000, from scratch ===
+=== fixed scales: ion_cont=0.6100892858913114 energy=0.965239365788521 ion_mom=0.7936910647527818 ===
+EPOCHS_TO_RUN overridden via env: 15000
+LBFGS_STEPS overridden via env: 0
+Using device: cpu
+Init seed before build_model = 7; collocation/boundary seed = 2601.
+Training p5_physics_only: from_scratch=True, checkpoint=<none>; epoch 0 -> 15000. ADAM epochs followed by 0 L-BFGS steps. v26 collocation counts are reused without resampling.
+Continuity experiment overrides: ni_inlet=0.0138361 (4.640e+17 m^-3), Vn=450.0 m/s, nu_in=1.800e+06 s^-1 (nu_in_hat=1.02206), ki taper center=5.00 eV, width=0.35 eV, energy_alpha=2.50.
+Discharge-current target: Id=5.400 A, A_channel=1.138827e-02 m^2, JT_norm=0.02959875, JT_A_scale=182.44 A per normalized JT.
+Hybrid data loss ENABLED (weights ni=10.0, Te=5.0, Vp=30.0); csv=/private/tmp/p5_reference_v3_20260904/code/haas_gallimore_p5_5p4A.csv
+Haas/Gallimore P5 (300V/5.4A) — data loaded (in-domain / dropped):
+   ni:  145 kept  /   210 outside domain
+   Te:  145 kept  /   210 outside domain
+   Vp:  145 kept  /   210 outside domain
+Data weights fixed for this run: ni/Te/Vp=10/5/30; no annealing.
+Output index mapping: 0=phi, 1=ni, 2=Vix, 3=Vir, 4=nn, 5=ne, 6=Vex, 7=Ver, 8=Te, 9=Vetheta, 10=eta
+Network raw outputs: 0=phi, 1=direct ni log-amplitude, 2=Vex correction, 3=Vir, 4=nn depletion, 5=Ver, 6=Vetheta, 7=eta, 8=Te, 9=Vix.
+Phi form: phi = phi_L + (phi_R - phi_L)*xi + xi*(1-xi)*25*tanh(raw0); end Dirichlet BCs are hard.
+Init phi hard-BC check: left=24.7933884298 target=24.7933884298 max_err=0.000e+00; right=9.60330578512 target=9.60330578512 max_err=0.000e+00
+Init phi centerline (A=25 correction active, raw0 at init):
+  x=0.00:phi=300.0V | x=0.10:phi=272.4V | x=0.20:phi=247.6V | x=0.30:phi=225.3V | x=0.40:phi=205.2V | x=0.50:phi=187.2V | x=0.60:phi=170.8V | x=0.70:phi=155.8V | x=0.80:phi=141.9V | x=0.90:phi=128.8V | x=1.00:phi=116.2V
+Phi shape capacity check: at x~0.55 linear=189.72V, max correction=72.60V (HG needs about +65.6V at x=0.55).
+Init Vix Bohm-referenced check: Vix(x=0)=0.025, Vix(x~0.55)=3.175, Vix(exit)=5.275, anode target=0.025, old Bohm=0.5.
+Init ni centerline shape (before training/checkpoint load):
+  x=0.00:ni=0.01384 | x=0.10:ni=0.02346 | x=0.20:ni=0.03538 | x=0.30:ni=0.04745 | x=0.40:ni=0.05658 | x=0.50:ni=0.06000 | x=0.60:ni=0.05658 | x=0.70:ni=0.04745 | x=0.80:ni=0.03538 | x=0.90:ni=0.02346 | x=1.00:ni=0.01384
+Init conservative ion-friction sign check at x=0.55 centerline: Vix=2.9125, Vn=0.15091, nu_in_hat=22.9383, neutral_friction_residual_x=3.745412e+00, birth_momentum_residual_x=-1.165939e-01, electron_drag_residual_x=2.864527e-05, total_drag_residual_x=3.628846e+00, ni*dphi/dx=-8.000283e-01, |friction/electric|=4.5359. Positive neutral-friction residual at Vix>Vn corresponds to a negative physical drag force.
+Model initialized. eta_max=1.00e-04, ki_scale=1.0
+Ion continuity residual scale factor: 6.100893e-01
+Electron energy residual scale factor: 2.268111e+00
+Ion momentum residual scale factor: 2.607872e+00
+Fixed reference residual scales: ion_cont=0.6100892858913114, energy=0.965239365788521, ion_mom=0.7936910647527818.
+Ion force sign check: old 1D closure gives Vix*dVix/dx + dphi/dx = 0; therefore conservative residual uses +ni*dphi/dx.
+Typical collision magnitudes at init: nu_ei=2.792e+06 Hz, nu_en=1.443e+07 Hz
+compute_data_loss output index mapping: {'ni': 1, 'Te': 8, 'Vp': 0}
+  PINN.forward returns (0=phi, 1=ni, 2=Vix, 3=Vir, 4=nn, 5=ne, 6=Vex, 7=Ver, 8=Te, 9=Vetheta, 10=eta)
+[epoch     0] total=1384.327189  ni_peak=0.0600@x=0.503  sat95=0.000  IonCont=0.6146 NeutCont=0.5265 Poisson=0.0023 wdata=1
+  epoch   250 | total=38.3376 | Poisson=1.293e-04 | IonCont=0.0101 | NeutCont=0.0003 | |eta|=6.68e-06 | JT*=0.0296 | ni int_max=0.0313 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=1.044e+00/3.135e+00/2.245e-01
+[epoch   500] total=27.258854  ni_peak=0.0345@x=0.432  sat95=0.000  IonCont=0.0289 NeutCont=0.0211 Poisson=0.0049  wdata=1  Ldata(ni/Te/Vp)=6.579e-01/3.044e+00/1.433e-01
+  epoch   750 | total=26.0871 | Poisson=2.293e-05 | IonCont=0.0020 | NeutCont=0.0004 | |eta|=2.63e-05 | JT*=0.0296 | ni int_max=0.0303 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=6.267e-01/3.001e+00/1.300e-01
+[epoch  1000] total=25.637057  ni_peak=0.0275@x=0.442  sat95=0.000  IonCont=0.0260 NeutCont=0.0239 Poisson=0.0046  wdata=1  Ldata(ni/Te/Vp)=6.118e-01/2.985e+00/1.274e-01
+  epoch  1250 | total=25.2868 | Poisson=1.608e-05 | IonCont=0.0019 | NeutCont=0.0008 | |eta|=2.74e-05 | JT*=0.0296 | ni int_max=0.0282 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=5.997e-01/2.957e+00/1.228e-01
+[epoch  1500] total=24.989631  ni_peak=0.0280@x=0.653  sat95=0.000  IonCont=0.0291 NeutCont=0.0338 Poisson=0.0036  wdata=1  Ldata(ni/Te/Vp)=5.831e-01/2.934e+00/1.195e-01
+  epoch  1750 | total=15.3009 | Poisson=1.463e-05 | IonCont=0.0094 | NeutCont=0.0273 | |eta|=3.31e-05 | JT*=0.0296 | ni int_max=0.0291 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=5.622e-01/1.741e-01/1.261e-01
+[epoch  2000] total=13.331613  ni_peak=0.0336@x=0.553  sat95=0.000  IonCont=0.0450 NeutCont=0.1581 Poisson=0.0048  wdata=1  Ldata(ni/Te/Vp)=5.174e-01/9.300e-02/1.177e-01
+  epoch  2250 | total=12.7823 | Poisson=2.679e-05 | IonCont=0.0048 | NeutCont=0.0246 | |eta|=2.73e-05 | JT*=0.0296 | ni int_max=0.0377 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=4.940e-01/7.551e-02/1.170e-01
+[epoch  2500] total=12.275268  ni_peak=0.0380@x=0.553  sat95=0.000  IonCont=0.0411 NeutCont=0.1534 Poisson=0.0059  wdata=1  Ldata(ni/Te/Vp)=4.568e-01/6.305e-02/1.160e-01
+  epoch  2750 | total=11.7130 | Poisson=4.250e-05 | IonCont=0.0046 | NeutCont=0.0239 | |eta|=2.15e-05 | JT*=0.0296 | ni int_max=0.0445 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=4.038e-01/5.580e-02/1.161e-01
+[epoch  3000] total=11.110782  ni_peak=0.0411@x=0.558  sat95=0.000  IonCont=0.0408 NeutCont=0.1519 Poisson=0.0067  wdata=1  Ldata(ni/Te/Vp)=3.487e-01/5.462e-02/1.152e-01
+  epoch  3250 | total=10.4944 | Poisson=4.737e-05 | IonCont=0.0044 | NeutCont=0.0236 | |eta|=2.39e-05 | JT*=0.0296 | ni int_max=0.0489 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=2.913e-01/5.405e-02/1.158e-01
+[epoch  3500] total=9.756513  ni_peak=0.0455@x=0.558  sat95=0.000  IonCont=0.0400 NeutCont=0.1514 Poisson=0.0070  wdata=1  Ldata(ni/Te/Vp)=2.249e-01/5.357e-02/1.147e-01
+  epoch  3750 | total=8.9855 | Poisson=5.560e-05 | IonCont=0.0043 | NeutCont=0.0235 | |eta|=2.58e-05 | JT*=0.0296 | ni int_max=0.0499 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=1.489e-01/4.911e-02/1.153e-01
+[epoch  4000] total=8.303913  ni_peak=0.0574@x=0.568  sat95=0.000  IonCont=0.0388 NeutCont=0.1526 Poisson=0.0075  wdata=1  Ldata(ni/Te/Vp)=8.733e-02/3.535e-02/1.145e-01
+  epoch  4250 | total=8.0750 | Poisson=5.637e-05 | IonCont=0.0039 | NeutCont=0.0239 | |eta|=2.67e-05 | JT*=0.0296 | ni int_max=0.0642 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=6.918e-02/2.881e-02/1.152e-01
+[epoch  4500] total=7.949622  ni_peak=0.0665@x=0.568  sat95=0.000  IonCont=0.0374 NeutCont=0.1534 Poisson=0.0076  wdata=1  Ldata(ni/Te/Vp)=6.153e-02/2.550e-02/1.143e-01
+  epoch  4750 | total=7.8686 | Poisson=5.751e-05 | IonCont=0.0038 | NeutCont=0.0239 | |eta|=2.79e-05 | JT*=0.0296 | ni int_max=0.0701 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=5.606e-02/2.372e-02/1.149e-01
+[epoch  5000] total=7.802830  ni_peak=0.0705@x=0.563  sat95=0.000  IonCont=0.0369 NeutCont=0.1535 Poisson=0.0076  wdata=1  Ldata(ni/Te/Vp)=5.226e-02/2.275e-02/1.142e-01
+  epoch  5250 | total=7.7536 | Poisson=5.576e-05 | IonCont=0.0037 | NeutCont=0.0239 | |eta|=2.95e-05 | JT*=0.0296 | ni int_max=0.0724 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=4.884e-02/2.217e-02/1.148e-01
+[epoch  5500] total=7.706157  ni_peak=0.0724@x=0.563  sat95=0.000  IonCont=0.0367 NeutCont=0.1533 Poisson=0.0075  wdata=1  Ldata(ni/Te/Vp)=4.642e-02/2.179e-02/1.141e-01
+  epoch  5750 | total=7.6715 | Poisson=5.582e-05 | IonCont=0.0036 | NeutCont=0.0238 | |eta|=3.12e-05 | JT*=0.0296 | ni int_max=0.0739 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=4.377e-02/2.135e-02/1.147e-01
+[epoch  6000] total=7.637011  ni_peak=0.0738@x=0.558  sat95=0.000  IonCont=0.0367 NeutCont=0.1528 Poisson=0.0075  wdata=1  Ldata(ni/Te/Vp)=4.235e-02/2.115e-02/1.140e-01
+  epoch  6250 | total=7.6102 | Poisson=5.584e-05 | IonCont=0.0037 | NeutCont=0.0236 | |eta|=3.28e-05 | JT*=0.0296 | ni int_max=0.0748 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=4.077e-02/2.096e-02/1.146e-01
+[epoch  6500] total=7.582345  ni_peak=0.0747@x=0.553  sat95=0.000  IonCont=0.0367 NeutCont=0.1523 Poisson=0.0076  wdata=1  Ldata(ni/Te/Vp)=3.993e-02/2.096e-02/1.140e-01
+  epoch  6750 | total=7.5607 | Poisson=5.636e-05 | IonCont=0.0037 | NeutCont=0.0234 | |eta|=3.41e-05 | JT*=0.0296 | ni int_max=0.0755 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.863e-02/2.087e-02/1.145e-01
+[epoch  7000] total=7.534641  ni_peak=0.0753@x=0.543  sat95=0.000  IonCont=0.0368 NeutCont=0.1516 Poisson=0.0076  wdata=1  Ldata(ni/Te/Vp)=3.810e-02/2.102e-02/1.139e-01
+  epoch  7250 | total=7.5144 | Poisson=5.838e-05 | IonCont=0.0037 | NeutCont=0.0232 | |eta|=3.53e-05 | JT*=0.0296 | ni int_max=0.0759 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.709e-02/2.097e-02/1.142e-01
+[epoch  7500] total=7.498788  ni_peak=0.0756@x=0.538  sat95=0.000  IonCont=0.0367 NeutCont=0.1509 Poisson=0.0078  wdata=1  Ldata(ni/Te/Vp)=3.682e-02/2.114e-02/1.138e-01
+  epoch  7750 | total=7.4811 | Poisson=6.009e-05 | IonCont=0.0036 | NeutCont=0.0231 | |eta|=3.65e-05 | JT*=0.0296 | ni int_max=0.0760 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.592e-02/2.102e-02/1.142e-01
+[epoch  8000] total=7.468233  ni_peak=0.0759@x=0.538  sat95=0.000  IonCont=0.0365 NeutCont=0.1507 Poisson=0.0079  wdata=1  Ldata(ni/Te/Vp)=3.587e-02/2.121e-02/1.138e-01
+  epoch  8250 | total=7.4538 | Poisson=6.118e-05 | IonCont=0.0036 | NeutCont=0.0230 | |eta|=3.78e-05 | JT*=0.0296 | ni int_max=0.0761 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.516e-02/2.108e-02/1.142e-01
+[epoch  8500] total=7.441360  ni_peak=0.0762@x=0.533  sat95=0.000  IonCont=0.0363 NeutCont=0.1506 Poisson=0.0079  wdata=1  Ldata(ni/Te/Vp)=3.521e-02/2.131e-02/1.137e-01
+  epoch  8750 | total=7.4331 | Poisson=6.223e-05 | IonCont=0.0036 | NeutCont=0.0229 | |eta|=3.90e-05 | JT*=0.0296 | ni int_max=0.0764 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.470e-02/2.124e-02/1.143e-01
+[epoch  9000] total=7.421327  ni_peak=0.0764@x=0.528  sat95=0.010  IonCont=0.0361 NeutCont=0.1505 Poisson=0.0080  wdata=1  Ldata(ni/Te/Vp)=3.481e-02/2.154e-02/1.137e-01
+  epoch  9250 | total=7.4155 | Poisson=6.319e-05 | IonCont=0.0036 | NeutCont=0.0228 | |eta|=4.01e-05 | JT*=0.0296 | ni int_max=0.0765 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.435e-02/2.146e-02/1.142e-01
+[epoch  9500] total=7.405707  ni_peak=0.0766@x=0.523  sat95=0.028  IonCont=0.0360 NeutCont=0.1505 Poisson=0.0081  wdata=1  Ldata(ni/Te/Vp)=3.449e-02/2.171e-02/1.137e-01
+  epoch  9750 | total=7.4041 | Poisson=6.434e-05 | IonCont=0.0035 | NeutCont=0.0228 | |eta|=4.10e-05 | JT*=0.0296 | ni int_max=0.0765 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.410e-02/2.154e-02/1.143e-01
+[epoch 10000] total=7.394923  ni_peak=0.0768@x=0.523  sat95=0.042  IonCont=0.0359 NeutCont=0.1504 Poisson=0.0082  wdata=1  Ldata(ni/Te/Vp)=3.429e-02/2.178e-02/1.137e-01
+  epoch 10250 | total=7.3915 | Poisson=6.593e-05 | IonCont=0.0035 | NeutCont=0.0227 | |eta|=4.19e-05 | JT*=0.0296 | ni int_max=0.0766 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.400e-02/2.160e-02/1.141e-01
+[epoch 10500] total=7.386553  ni_peak=0.0769@x=0.518  sat95=0.055  IonCont=0.0358 NeutCont=0.1503 Poisson=0.0083  wdata=1  Ldata(ni/Te/Vp)=3.413e-02/2.181e-02/1.136e-01
+  epoch 10750 | total=7.3829 | Poisson=6.757e-05 | IonCont=0.0035 | NeutCont=0.0227 | |eta|=4.26e-05 | JT*=0.0296 | ni int_max=0.0767 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.389e-02/2.160e-02/1.141e-01
+[epoch 11000] total=7.378371  ni_peak=0.0770@x=0.518  sat95=0.069  IonCont=0.0357 NeutCont=0.1503 Poisson=0.0084  wdata=1  Ldata(ni/Te/Vp)=3.424e-02/2.182e-02/1.136e-01
+  epoch 11250 | total=7.3753 | Poisson=6.930e-05 | IonCont=0.0035 | NeutCont=0.0227 | |eta|=4.33e-05 | JT*=0.0296 | ni int_max=0.0768 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.391e-02/2.159e-02/1.141e-01
+[epoch 11500] total=7.371058  ni_peak=0.0770@x=0.513  sat95=0.081  IonCont=0.0356 NeutCont=0.1502 Poisson=0.0085  wdata=1  Ldata(ni/Te/Vp)=3.414e-02/2.182e-02/1.136e-01
+  epoch 11750 | total=7.3712 | Poisson=7.064e-05 | IonCont=0.0035 | NeutCont=0.0226 | |eta|=4.39e-05 | JT*=0.0296 | ni int_max=0.0769 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.381e-02/2.158e-02/1.141e-01
+[epoch 12000] total=7.363627  ni_peak=0.0770@x=0.513  sat95=0.092  IonCont=0.0355 NeutCont=0.1502 Poisson=0.0085  wdata=1  Ldata(ni/Te/Vp)=3.410e-02/2.181e-02/1.136e-01
+  epoch 12250 | total=7.3647 | Poisson=7.194e-05 | IonCont=0.0035 | NeutCont=0.0226 | |eta|=4.45e-05 | JT*=0.0296 | ni int_max=0.0769 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.384e-02/2.159e-02/1.141e-01
+[epoch 12500] total=7.360194  ni_peak=0.0772@x=0.513  sat95=0.101  IonCont=0.0354 NeutCont=0.1503 Poisson=0.0086  wdata=1  Ldata(ni/Te/Vp)=3.410e-02/2.187e-02/1.136e-01
+  epoch 12750 | total=7.3579 | Poisson=7.307e-05 | IonCont=0.0034 | NeutCont=0.0226 | |eta|=4.50e-05 | JT*=0.0296 | ni int_max=0.0768 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.386e-02/2.162e-02/1.140e-01
+[epoch 13000] total=7.355259  ni_peak=0.0771@x=0.508  sat95=0.109  IonCont=0.0354 NeutCont=0.1503 Poisson=0.0087  wdata=1  Ldata(ni/Te/Vp)=3.402e-02/2.187e-02/1.136e-01
+  epoch 13250 | total=7.3529 | Poisson=7.366e-05 | IonCont=0.0034 | NeutCont=0.0225 | |eta|=4.54e-05 | JT*=0.0296 | ni int_max=0.0768 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.384e-02/2.162e-02/1.140e-01
+[epoch 13500] total=7.350655  ni_peak=0.0771@x=0.508  sat95=0.115  IonCont=0.0353 NeutCont=0.1503 Poisson=0.0087  wdata=1  Ldata(ni/Te/Vp)=3.415e-02/2.186e-02/1.136e-01
+  epoch 13750 | total=7.3491 | Poisson=7.396e-05 | IonCont=0.0034 | NeutCont=0.0225 | |eta|=4.58e-05 | JT*=0.0296 | ni int_max=0.0768 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.381e-02/2.159e-02/1.140e-01
+[epoch 14000] total=7.345608  ni_peak=0.0769@x=0.508  sat95=0.124  IonCont=0.0354 NeutCont=0.1503 Poisson=0.0087  wdata=1  Ldata(ni/Te/Vp)=3.410e-02/2.181e-02/1.136e-01
+  epoch 14250 | total=7.3469 | Poisson=7.404e-05 | IonCont=0.0034 | NeutCont=0.0225 | |eta|=4.61e-05 | JT*=0.0296 | ni int_max=0.0768 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.378e-02/2.154e-02/1.141e-01
+[epoch 14500] total=7.343059  ni_peak=0.0770@x=0.508  sat95=0.132  IonCont=0.0352 NeutCont=0.1505 Poisson=0.0087  wdata=1  Ldata(ni/Te/Vp)=3.405e-02/2.180e-02/1.136e-01
+  epoch 14750 | total=7.3424 | Poisson=7.437e-05 | IonCont=0.0034 | NeutCont=0.0225 | |eta|=4.64e-05 | JT*=0.0296 | ni int_max=0.0768 | lr=1.00e-04 | wdata=1 | Ldata(ni/Te/Vp)=3.372e-02/2.154e-02/1.140e-01
+[epoch 15000] total=7.339740  ni_peak=0.0768@x=0.508  sat95=0.140  IonCont=0.0354 NeutCont=0.1503 Poisson=0.0087  wdata=1  Ldata(ni/Te/Vp)=3.404e-02/2.176e-02/1.136e-01
+Training stopped: completed 15000 ADAM epochs + 0 L-BFGS steps
+Elapsed: 367.44 min
+Checkpoint saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/p5_reference_v3_checkpoint.pt
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/p5_physics_only_combined.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Loss_Plots/p5_physics_only_Loss_summary.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/p5_physics_only_residuals.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/p5_physics_only_centerline.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/p5_physics_only_radial_profiles.png
+========================================================================
+  Performance Metrics — p5_physics_only
+========================================================================
+  Quantity                                       PINN         P5 ref
+  -------------------------------------------------------------------
+  Discharge current [A]                         5.400           5.40
+  Ionization efficiency [—]                     1.000           0.90
+  Mean Vix(exit) [km/s]                         6.206              —
+  Vix(exit)/V_classical [—]                     0.296              —
+  Beam Isp estimate [s]                       444.379        1640.00
+  JT_norm (target)                              0.030              —
+  JT_trained                                    0.030              —
+========================================================================
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/p5_physics_only_metrics.txt
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_ni_r1.6447.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_ni_r1.7763.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_ni_r1.9079.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_ni_r2.0395.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_ni_r2.1711.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_Te_r1.6447.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_Te_r1.7763.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_Te_r1.9079.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_Te_r2.0395.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_Te_r2.1711.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_Vp_r1.6447.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_Vp_r1.7763.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_Vp_r1.9079.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_Vp_r2.0395.png
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/Big_Plots/data_comparison_Vp_r2.1711.png
+
+=== Hybrid data-loss final summary (Haas & Gallimore P5) ===
+  L_data_ni (log-MSE, normalized density) = 3.404265e-02
+  L_data_Te (MSE, normalized) = 2.176315e-02
+  L_data_Vp (MSE, normalized) = 1.135694e-01
+  L2 relative error  ni = 0.2008
+  L2 relative error  Te = 0.0701
+  L2 relative error  Vp = 0.0173
+  (Te is a trainable output in v3; Te data loss back-propagates.)
+/private/tmp/p5_reference_v3_20260904/code/mainScript.py:203: DeprecationWarning: `trapz` is deprecated. Use `trapezoid` instead, or one of the numerical integration functions in `scipy.integrate`.
+  P_ion = S_ref * np.trapz(np.trapz(Si * ring[None, :], r, axis=1), x) * Lc**3
+/private/tmp/p5_reference_v3_20260904/code/mainScript.py:204: DeprecationWarning: `trapz` is deprecated. Use `trapezoid` instead, or one of the numerical integration functions in `scipy.integrate`.
+  C_neut = S_ref * np.trapz(np.trapz((ki * ni * nn_) * ring[None, :], r, axis=1), x) * Lc**3
+/private/tmp/p5_reference_v3_20260904/code/mainScript.py:205: DeprecationWarning: `trapz` is deprecated. Use `trapezoid` instead, or one of the numerical integration functions in `scipy.integrate`.
+  F_ion_out = n_ref * V_ref * np.trapz(ni[-1, :] * Vix[-1, :] * ring, r) * Lc**2
+/private/tmp/p5_reference_v3_20260904/code/mainScript.py:206: DeprecationWarning: `trapz` is deprecated. Use `trapezoid` instead, or one of the numerical integration functions in `scipy.integrate`.
+  F_n_in = n_ref * V_ref * np.trapz(nn_[0, :] * physics["Vn"] * ring, r) * Lc**2
+/private/tmp/p5_reference_v3_20260904/code/mainScript.py:207: DeprecationWarning: `trapz` is deprecated. Use `trapezoid` instead, or one of the numerical integration functions in `scipy.integrate`.
+  F_n_out = n_ref * V_ref * np.trapz(nn_[-1, :] * physics["Vn"] * ring, r) * Lc**2
+Saved: /private/tmp/p5_reference_v3_20260904/outputs/p5_reference_v3/VALIDATION_p5_reference_v3.md
